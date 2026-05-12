@@ -1,12 +1,13 @@
-﻿import { useEffect, useState } from 'react'
-import { ChevronDown, ChevronUp, RefreshCw, Wand2 } from 'lucide-react'
-import { ConfirmModal, FormItem, Input, Select, Textarea } from '../../../shared/components'
+﻿import {useEffect, useState} from 'react'
+import {ChevronDown, ChevronUp, MapPin, RefreshCw, Wand2} from 'lucide-react'
+import {ConfirmModal, FormItem, Input, Select, Textarea} from '../../../shared/components'
 import {
-  type FingerprintConfig,
-  FINGERPRINT_PRESETS,
-  PRESET_RESOLUTIONS,
   deserialize,
+  FINGERPRINT_PRESETS,
+  type FingerprintConfig,
   getSystemTimezone,
+  PRESET_RESOLUTIONS,
+  type ProxyGeoInfo,
   randomFingerprintSeed,
   serialize,
 } from '../utils/fingerprintSerializer'
@@ -14,6 +15,8 @@ import {
 interface FingerprintPanelProps {
   value: string[]
   onChange: (args: string[]) => void
+  /** 代理出口 IP 推荐的地理信息（来自 IP 健康检测） */
+  proxyGeo?: ProxyGeoInfo
 }
 
 const BRAND_OPTIONS = [
@@ -170,7 +173,7 @@ const PRESET_OPTIONS = [
   ...FINGERPRINT_PRESETS.map(p => ({ value: p.id, label: p.name })),
 ]
 
-export function FingerprintPanel({ value, onChange }: FingerprintPanelProps) {
+export function FingerprintPanel({ value, onChange, proxyGeo }: FingerprintPanelProps) {
   const [config, setConfig] = useState<FingerprintConfig>(() => deserialize(value))
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [, setCustomRenderer] = useState('')
@@ -275,7 +278,23 @@ export function FingerprintPanel({ value, onChange }: FingerprintPanelProps) {
 
       {/* 基础身份 */}
       <div>
-        <p className="text-xs font-medium text-[var(--color-text-muted)] mb-2 uppercase tracking-wide">基础身份</p>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">基础身份</p>
+          {proxyGeo && (proxyGeo.lang || proxyGeo.timezone) && (
+            <button
+              type="button"
+              onClick={() => update({
+                ...(proxyGeo.lang ? { lang: proxyGeo.lang } : {}),
+                ...(proxyGeo.timezone ? { timezone: proxyGeo.timezone } : {}),
+              })}
+              className="flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-[var(--color-primary-bg)] text-[var(--color-primary)] hover:bg-[var(--color-primary)] hover:text-white transition-colors"
+              title={`应用代理推荐：${[proxyGeo.lang, proxyGeo.timezone].filter(Boolean).join(' / ')}${proxyGeo.country ? ` (${proxyGeo.country})` : ''}`}
+            >
+              <MapPin className="w-3 h-3" />
+              应用代理推荐
+            </button>
+          )}
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <FormItem label="浏览器品牌">
             <Select value={config.brand ?? ''} onChange={e => update({ brand: e.target.value || undefined })} options={BRAND_OPTIONS} />
@@ -284,16 +303,66 @@ export function FingerprintPanel({ value, onChange }: FingerprintPanelProps) {
             <Select value={config.platform ?? ''} onChange={e => update({ platform: e.target.value || undefined })} options={PLATFORM_OPTIONS} />
           </FormItem>
           <FormItem label="语言">
-            <Select value={config.lang ?? ''} onChange={e => update({ lang: e.target.value || undefined })} options={LANG_OPTIONS} />
+            <div className="flex items-center gap-2">
+              <Select
+                value={config.lang ?? ''}
+                onChange={e => update({ lang: e.target.value || undefined })}
+                options={
+                  proxyGeo?.lang && !LANG_OPTIONS.some(o => o.value === proxyGeo.lang)
+                    ? [...LANG_OPTIONS, { value: proxyGeo.lang, label: `${proxyGeo.lang}（代理推荐）` }]
+                    : LANG_OPTIONS
+                }
+                className="flex-1"
+              />
+              {proxyGeo?.lang && proxyGeo.lang !== config.lang && (
+                <button
+                  type="button"
+                  onClick={() => update({ lang: proxyGeo.lang })}
+                  className="flex items-center gap-1 px-1.5 py-1 rounded text-xs text-[var(--color-primary)] hover:bg-[var(--color-primary-bg)] transition-colors shrink-0"
+                  title={`跟随代理：${proxyGeo.lang}${proxyGeo.country ? ` (${proxyGeo.country})` : ''}`}
+                >
+                  <MapPin className="w-3 h-3" />
+                </button>
+              )}
+            </div>
           </FormItem>
           <FormItem label="时区">
-            <Select value={config.timezone ?? ''} onChange={e => update({ timezone: e.target.value || undefined })} options={TIMEZONE_OPTIONS.map(opt =>
-              opt.value === 'system'
-                ? { ...opt, label: `跟随系统时区 (当前: ${getSystemTimezone()})` }
-                : opt
-            )} />
+            <div className="flex items-center gap-2">
+              <Select
+                value={config.timezone ?? ''}
+                onChange={e => update({ timezone: e.target.value || undefined })}
+                options={
+                  (proxyGeo?.timezone && !TIMEZONE_OPTIONS.some(o => o.value === proxyGeo.timezone)
+                    ? [...TIMEZONE_OPTIONS, { value: proxyGeo.timezone, label: `${proxyGeo.timezone}（代理推荐）` }]
+                    : TIMEZONE_OPTIONS
+                  ).map(opt =>
+                    opt.value === 'system'
+                      ? { ...opt, label: `跟随系统时区 (当前: ${getSystemTimezone()})` }
+                      : opt
+                  )
+                }
+                className="flex-1"
+              />
+              {proxyGeo?.timezone && proxyGeo.timezone !== config.timezone && (
+                <button
+                  type="button"
+                  onClick={() => update({ timezone: proxyGeo.timezone })}
+                  className="flex items-center gap-1 px-1.5 py-1 rounded text-xs text-[var(--color-primary)] hover:bg-[var(--color-primary-bg)] transition-colors shrink-0"
+                  title={`跟随代理：${proxyGeo.timezone}${proxyGeo.country ? ` (${proxyGeo.country})` : ''}`}
+                >
+                  <MapPin className="w-3 h-3" />
+                </button>
+              )}
+            </div>
           </FormItem>
         </div>
+        {proxyGeo && (proxyGeo.lang || proxyGeo.timezone) && (
+          <p className="text-xs text-[var(--color-text-muted)] mt-2 flex items-center gap-1">
+            <MapPin className="w-3 h-3 inline shrink-0" />
+            代理推荐：{[proxyGeo.lang, proxyGeo.timezone].filter(Boolean).join(' / ')}
+            {proxyGeo.country ? ` (${proxyGeo.country})` : ''}
+          </p>
+        )}
       </div>
 
       {/* 屏幕与硬件 */}

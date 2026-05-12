@@ -223,8 +223,21 @@ func main() {
 			if startupDebugEnabled {
 				log.Printf("Wails OnShutdown 已触发")
 			}
-			backend.QuitTray()
-			app.shutdown(ctx)
+
+			done := make(chan struct{})
+			go func() {
+				backend.QuitTray()
+				app.shutdown(ctx)
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				// 正常退出
+			case <-time.After(10 * time.Second):
+				log.Printf("关闭超时，强制退出进程")
+				os.Exit(0)
+			}
 		},
 		// 拦截关闭按钮事件，由前端处理自定义对话框
 		OnBeforeClose: func(ctx context.Context) bool {

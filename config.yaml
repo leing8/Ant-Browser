@@ -9,7 +9,7 @@ app:
         height: 1000
         min_width: 1200
         min_height: 700
-    max_profile_limit: 20
+    max_profile_limit: 999
     used_cd_keys: []
 runtime:
     max_memory_mb: 0
@@ -44,10 +44,41 @@ browser:
     default_launch_args:
         - --disable-sync
         - --no-first-run
-    default_start_urls: []
-    restore_last_session: false
+    default_start_urls:
+        - https://testrecaptcha.github.io/
+        - https://abrahamjuliot.github.io/creepjs/
+    restore_last_session: true
     start_ready_timeout_ms: 3000
     start_stable_window_ms: 1200
+    cores:
+        - core_id: 4f4c2f73-0d46-466e-838b-ebd34fb9ee86
+          core_name: chromium-144.0.7559.132
+          core_path: chrome\chromium-144.0.7559.132
+          is_default: true
+        - core_id: d0e3249d-7aa4-4492-a5f6-f0276ceceb8c
+          core_name: chromium-142.0.7444.175
+          core_path: chrome\chromium-142.0.7444.175
+          is_default: false
+        - core_id: core-cloakbrowser-146.0.7680.177.4
+          core_name: Chrome cloakbrowser-146.0.7680.177.4
+          core_path: chrome\cloakbrowser-146.0.7680.177.4
+          is_default: false
+    proxies:
+        - proxy_id: __direct__
+          proxy_name: 直连（不走代理）
+          proxy_config: direct://
+        - proxy_id: proxy-1778496074291-t44f36
+          proxy_name: ipdodo
+          proxy_config: socks5://o0_1742954320-shl-106964-1:59395f3e@14.119.66.147:30806
+          sort_order: 1
+        - proxy_id: proxy-1778564493963-mf5w0s
+          proxy_name: 45.58.227.204:6376
+          proxy_config: socks5://ydncousc:hlpckyjomt5a@45.58.227.204:6376
+          sort_order: 2
+        - proxy_id: proxy-1778566413233-ywz5sq
+          proxy_name: ws
+          proxy_config: chain+socks5://%7B%22first%22%3A%7B%22protocol%22%3A%22socks5%22%2C%22server%22%3A%2214.119.66.147%22%2C%22port%22%3A30806%2C%22username%22%3A%22o0_1742954320-shl-106964-1%22%2C%22password%22%3A%2259395f3e%22%7D%2C%22second%22%3A%7B%22protocol%22%3A%22socks5%22%2C%22server%22%3A%2245.58.227.204%22%2C%22port%22%3A6376%2C%22username%22%3A%22ydncousc%22%2C%22password%22%3A%22hlpckyjomt5a%22%7D%7D
+          sort_order: 3
 proxy_check:
     bridge_start_timeout_ms: 15000
     speed_target_id: ""

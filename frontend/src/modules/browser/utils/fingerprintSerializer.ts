@@ -153,6 +153,95 @@ export function randomFingerprintSeed(): string {
   return String(Math.floor(Math.random() * 2147483647) + 1)
 }
 
+// ─── 代理 IP 地理信息 → 语言 / 时区推荐 ────────────────────────────────────────
+
+/** 代理出口 IP 推荐的地理信息（用于自动填充语言和时区） */
+export interface ProxyGeoInfo {
+  /** IANA 时区标识符（如 "America/Los_Angeles"），直接来自 IP 检测接口 */
+  timezone?: string
+  /** ISO 3166-1 alpha-2 国家代码（如 "US"），来自 IP 检测接口 */
+  countryCode?: string
+  /** BCP 47 语言标签（如 "en-US"），根据 countryCode 推算 */
+  lang?: string
+  /** 代理出口 IP 所在国家名称（如 "United States"） */
+  country?: string
+}
+
+/**
+ * ISO 3166-1 alpha-2 国家代码 → BCP 47 语言标签映射。
+ * 映射规则：取该国家最主要的 Chrome 浏览器语言标签。
+ */
+export const COUNTRY_LANG_MAP: Record<string, string> = {
+  // 东亚
+  CN: 'zh-CN', TW: 'zh-TW', HK: 'zh-HK', MO: 'zh-TW',
+  JP: 'ja-JP', KR: 'ko-KR',
+  // 东南亚
+  SG: 'en-SG', MY: 'ms-MY', TH: 'th-TH', VN: 'vi-VN',
+  ID: 'id-ID', PH: 'en-PH',
+  // 南亚
+  IN: 'hi-IN',
+  // 中东
+  AE: 'ar-AE', SA: 'ar-SA', IL: 'he-IL', TR: 'tr-TR',
+  // 北美
+  US: 'en-US', CA: 'en-CA', MX: 'es-MX',
+  // 南美
+  BR: 'pt-BR', AR: 'es-AR', CL: 'es-CL', CO: 'es-CO',
+  // 欧洲
+  GB: 'en-GB', IE: 'en-IE',
+  DE: 'de-DE', AT: 'de-AT', CH: 'de-CH',
+  FR: 'fr-FR', BE: 'fr-BE',
+  ES: 'es-ES', PT: 'pt-PT', IT: 'it-IT',
+  NL: 'nl-NL', PL: 'pl-PL', CZ: 'cs-CZ',
+  SE: 'sv-SE', NO: 'nb-NO', DK: 'da-DK', FI: 'fi-FI',
+  RU: 'ru-RU', UA: 'uk-UA', RO: 'ro-RO', HU: 'hu-HU',
+  GR: 'el-GR',
+  // 大洋洲
+  AU: 'en-AU', NZ: 'en-NZ',
+  // 非洲
+  ZA: 'en-ZA', NG: 'en-NG', EG: 'ar-EG',
+}
+
+/**
+ * 从 IP 健康检测结果的 rawData 中提取代理推荐的语言和时区。
+ *
+ * @param rawData - ProxyIPHealthResult.rawData 或直接从 lastIPHealthJson 解析出的对象
+ * @returns 推荐的地理信息；字段为空则表示无法推荐
+ */
+export function resolveGeoFromIPHealth(rawData: Record<string, any> | null | undefined): ProxyGeoInfo {
+  if (!rawData) return {}
+
+  const timezone = typeof rawData.timezone === 'string' ? rawData.timezone.trim() : ''
+  const countryCode = typeof rawData.countryCode === 'string' ? rawData.countryCode.trim().toUpperCase() : ''
+  const country = typeof rawData.country === 'string' ? rawData.country.trim() : ''
+  const lang = countryCode ? (COUNTRY_LANG_MAP[countryCode] ?? '') : ''
+
+  if (!timezone && !lang) return {}
+
+  return {
+    ...(timezone ? { timezone } : {}),
+    ...(countryCode ? { countryCode } : {}),
+    ...(lang ? { lang } : {}),
+    ...(country ? { country } : {}),
+  }
+}
+
+/**
+ * 从已持久化的 lastIPHealthJson 字符串中解析出代理推荐信息。
+ * 优先使用 rawData 字段（保留原始接口数据），回退到顶层字段。
+ */
+export function resolveGeoFromIPHealthJSON(jsonStr: string | null | undefined): ProxyGeoInfo {
+  if (!jsonStr) return {}
+  try {
+    const parsed = JSON.parse(jsonStr)
+    // lastIPHealthJson 中 rawData 保留了原始 API 响应（含 timezone/countryCode）
+    // 顶层也有 country 但没有 timezone/countryCode，需要从 rawData 取
+    const rawData = parsed?.rawData ?? parsed
+    return resolveGeoFromIPHealth(rawData)
+  } catch {
+    return {}
+  }
+}
+
 // ─── 预设指纹配置 ────────────────────────────────────────────────────────────
 
 export interface FingerprintPreset {

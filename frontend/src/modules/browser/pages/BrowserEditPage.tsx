@@ -1,13 +1,25 @@
-import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import { FolderOpen, Layers } from 'lucide-react'
-import { Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast } from '../../../shared/components'
-import type { BrowserCore, BrowserProfileInput, BrowserProxy, BrowserGroup } from '../types'
-import { createBrowserProfile, fetchAllTags, fetchBrowserCores, fetchBrowserProfiles, fetchBrowserProxies, fetchBrowserSettings, fetchGroups, openUserDataDir, updateBrowserProfile } from '../api'
-import { FingerprintPanel } from '../components/FingerprintPanel'
-import { TagInput } from '../components/TagInput'
-import { GroupSelector } from '../components/GroupSelector'
-import { ProxyPickerModal } from '../components/ProxyPickerModal'
+import {useEffect, useRef, useState} from 'react'
+import {useNavigate, useParams} from 'react-router-dom'
+import {FolderOpen, Layers} from 'lucide-react'
+import {Button, Card, ConfirmModal, FormItem, Input, Modal, Select, Textarea, toast} from '../../../shared/components'
+import type {BrowserCore, BrowserGroup, BrowserProfileInput, BrowserProxy} from '../types'
+import {
+  browserProxyCheckIPHealth,
+  createBrowserProfile,
+  fetchAllTags,
+  fetchBrowserCores,
+  fetchBrowserProfiles,
+  fetchBrowserProxies,
+  fetchBrowserSettings,
+  fetchGroups,
+  openUserDataDir,
+  updateBrowserProfile
+} from '../api'
+import {FingerprintPanel} from '../components/FingerprintPanel'
+import {TagInput} from '../components/TagInput'
+import {GroupSelector} from '../components/GroupSelector'
+import {ProxyPickerModal} from '../components/ProxyPickerModal'
+import {type ProxyGeoInfo, resolveGeoFromIPHealth, resolveGeoFromIPHealthJSON} from '../utils/fingerprintSerializer'
 
 const fallbackLowLaunchArgs = ['--disable-sync', '--no-first-run']
 const directProxyID = '__direct__'
@@ -74,6 +86,8 @@ export function BrowserEditPage() {
   const [isDirty, setIsDirty] = useState(false)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [proxyGeo, setProxyGeo] = useState<ProxyGeoInfo | undefined>()
+  const proxyGeoAbortRef = useRef(0)
 
   useEffect(() => {
     const loadData = async () => {
@@ -130,6 +144,42 @@ export function BrowserEditPage() {
       return { ...prev, [field]: value }
     })
   }
+
+  // 当代理选择变化时，解析代理出口 IP 的地理信息（语言/时区推荐）
+  useEffect(() => {
+    const proxyId = formData.proxyId
+    // 直连或空代理不需要地理信息
+    if (!proxyId || proxyId === directProxyID) {
+      setProxyGeo(undefined)
+      return
+    }
+
+    const requestId = ++proxyGeoAbortRef.current
+
+    // 1. 尝试从已缓存的 lastIPHealthJson 提取
+    const matched = proxies.find(p => p.proxyId === proxyId)
+    if (matched?.lastIPHealthJson) {
+      const geo = resolveGeoFromIPHealthJSON(matched.lastIPHealthJson)
+      if (geo.timezone || geo.lang) {
+        setProxyGeo(geo)
+        return
+      }
+    }
+
+    // 2. 无缓存，异步调用 IP 健康检测
+    setProxyGeo(undefined)
+    browserProxyCheckIPHealth(proxyId)
+      .then(result => {
+        if (proxyGeoAbortRef.current !== requestId) return
+        if (result?.ok && result.rawData) {
+          const geo = resolveGeoFromIPHealth(result.rawData)
+          if (geo.timezone || geo.lang) {
+            setProxyGeo(geo)
+          }
+        }
+      })
+      .catch(() => { /* 查询失败不影响主流程 */ })
+  }, [formData.proxyId, proxies])
 
   const handleSave = async () => {
     setSaving(true)
@@ -309,6 +359,7 @@ export function BrowserEditPage() {
         <FingerprintPanel
           value={formData.fingerprintArgs}
           onChange={args => handleChange('fingerprintArgs', args)}
+          proxyGeo={proxyGeo}
         />
       </Card>
 
