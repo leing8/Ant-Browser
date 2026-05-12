@@ -1,18 +1,31 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { toast } from '../../../shared/components'
-import { fetchDashboardStats, redeemCDKey, redeemGithubStar, reloadConfig } from '../../dashboard/api'
-import type { BrowserCore, BrowserCoreInput, BrowserProfile, BrowserProxy, BrowserSettings, BrowserGroupWithCount } from '../types'
-import { BrowserCoreEditorModal, BrowserListHeader, BrowserListSettingsModal, type BrowserViewMode } from '../components/BrowserListLayout'
-import { BatchToolbar } from '../components/BrowserListWidgets'
-import { BrowserProfilesPanel } from '../components/BrowserProfilesPanel'
-import { EMPTY_FILTERS } from '../components/InstanceFilterBar'
-import type { InstanceFilters } from '../components/InstanceFilterBar'
-import { EventsOn, BrowserOpenURL } from '../../../wailsjs/runtime/runtime'
-import { PROJECT_GITHUB_URL } from '../../../config/links'
-import { resolveActionErrorMessage, resolveActionFeedback } from '../utils/actionErrors'
-import { BrowserListDialogs } from './browserList/BrowserListDialogs'
+import {useEffect, useMemo, useRef, useState} from 'react'
+import {toast} from '../../../shared/components'
+import {fetchDashboardStats, redeemCDKey, redeemGithubStar, reloadConfig} from '../../dashboard/api'
+import type {
+  BrowserCore,
+  BrowserCoreInput,
+  BrowserGroupWithCount,
+  BrowserProfile,
+  BrowserProxy,
+  BrowserSettings
+} from '../types'
+import {
+  BrowserCoreEditorModal,
+  BrowserListHeader,
+  BrowserListSettingsModal,
+  type BrowserViewMode
+} from '../components/BrowserListLayout'
+import {BatchToolbar} from '../components/BrowserListWidgets'
+import {BrowserProfilesPanel} from '../components/BrowserProfilesPanel'
+import type {InstanceFilters} from '../components/InstanceFilterBar'
+import {EMPTY_FILTERS} from '../components/InstanceFilterBar'
+import {BrowserOpenURL, EventsOn} from '../../../wailsjs/runtime/runtime'
+import {PROJECT_GITHUB_URL} from '../../../config/links'
+import {resolveActionErrorMessage, resolveActionFeedback} from '../utils/actionErrors'
+import {BrowserListDialogs} from './browserList/BrowserListDialogs'
 import {
   copyBrowserProfile,
+  copyBrowserProfileMultiple,
   deleteBrowserCore,
   deleteBrowserProfile,
   fetchBrowserCores,
@@ -110,15 +123,18 @@ export function BrowserListPage() {
   // 复制弹窗
   const [copyModal, setCopyModal] = useState<{ open: boolean; profile: BrowserProfile | null }>({ open: false, profile: null })
   const [copyName, setCopyName] = useState('')
+  const [copyCount, setCopyCount] = useState(1)
   const [copying, setCopying] = useState(false)
 
   const openCopyModal = (profile: BrowserProfile) => {
     setCopyName(profile.profileName + ' (副本)')
+    setCopyCount(1)
     setCopyModal({ open: true, profile })
   }
   const closeCopyModal = () => {
     setCopyModal({ open: false, profile: null })
     setCopyName('')
+    setCopyCount(1)
   }
 
   // 基础配置弹窗
@@ -594,8 +610,13 @@ export function BrowserListPage() {
     if (!copyModal.profile) return
     setCopying(true)
     try {
-      await copyBrowserProfile(profileId, copyName)
-      toast.success('实例已复制')
+      if (copyCount > 1) {
+        const results = await copyBrowserProfileMultiple(profileId, copyName, copyCount)
+        toast.success(`已成功复制 ${results.length} 个实例`)
+      } else {
+        await copyBrowserProfile(profileId, copyName)
+        toast.success('实例已复制')
+      }
       closeCopyModal()
       loadProfiles()
     } catch (error: any) {
@@ -845,7 +866,9 @@ export function BrowserListPage() {
         onOpenGithubStarGift={handleOpenGithubStarGift}
         copyModal={copyModal}
         copyName={copyName}
+        copyCount={copyCount}
         onCopyNameChange={setCopyName}
+        onCopyCountChange={setCopyCount}
         onCloseCopy={closeCopyModal}
         onConfirmCopy={() => copyModal.profile && handleCopy(copyModal.profile.profileId)}
         copying={copying}

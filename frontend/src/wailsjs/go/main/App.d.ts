@@ -114,6 +114,8 @@ export function BrowserProfileBatchSetTags(arg1:Array<string>,arg2:Array<string>
 
 export function BrowserProfileCopy(arg1:string,arg2:string):Promise<browser.Profile>;
 
+export function BrowserProfileCopyMultiple(arg1:string,arg2:string,arg3:number):Promise<Array<browser.Profile>>;
+
 export function BrowserProfileCreate(arg1:browser.ProfileInput):Promise<browser.Profile>;
 
 export function BrowserProfileDelete(arg1:string):Promise<void>;

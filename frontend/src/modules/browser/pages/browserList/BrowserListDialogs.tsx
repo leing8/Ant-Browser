@@ -1,8 +1,8 @@
-import { Link } from 'react-router-dom'
-import { ExternalLink, XCircle } from 'lucide-react'
-import { Button, FormItem, Input, Modal } from '../../../../shared/components'
-import { KeywordsModal } from '../../components/KeywordsModal'
-import type { BrowserProfile } from '../../types'
+import {Link} from 'react-router-dom'
+import {ExternalLink, XCircle} from 'lucide-react'
+import {Button, FormItem, Input, Modal} from '../../../../shared/components'
+import {KeywordsModal} from '../../components/KeywordsModal'
+import type {BrowserProfile} from '../../types'
 
 interface BrowserListDialogsProps {
   proxyErrorModal: boolean
@@ -25,7 +25,9 @@ interface BrowserListDialogsProps {
   onOpenGithubStarGift: () => void
   copyModal: { open: boolean; profile: BrowserProfile | null }
   copyName: string
+  copyCount: number
   onCopyNameChange: (value: string) => void
+  onCopyCountChange: (value: number) => void
   onCloseCopy: () => void
   onConfirmCopy: () => void
   copying: boolean
@@ -54,7 +56,9 @@ export function BrowserListDialogs({
   onOpenGithubStarGift,
   copyModal,
   copyName,
+  copyCount,
   onCopyNameChange,
+  onCopyCountChange,
   onCloseCopy,
   onConfirmCopy,
   copying,
@@ -173,7 +177,7 @@ export function BrowserListDialogs({
       >
         <div className="space-y-4">
           <p className="text-sm text-[var(--color-text-muted)]">
-            复制实例将保留原有的代理、内核、启动参数、标签等配置，但会生成新的指纹种子。
+            复制实例将保留原有的代理、内核、启动参数、标签、指纹配置等，但会生成新的指纹种子以确保每个副本拥有独立的指纹特征。
           </p>
           <FormItem label="新实例名称" required>
             <Input
@@ -181,6 +185,19 @@ export function BrowserListDialogs({
               onChange={e => onCopyNameChange(e.target.value)}
               placeholder="请输入新实例名称"
               autoFocus
+            />
+          </FormItem>
+          <FormItem label="复制数量" hint={copyCount > 1 ? `将自动以 "名称_1, 名称_2, ..." 方式命名` : undefined}>
+            <Input
+              type="number"
+              value={String(copyCount)}
+              onChange={e => {
+                const v = parseInt(e.target.value, 10)
+                onCopyCountChange(isNaN(v) ? 1 : Math.max(1, Math.min(100, v)))
+              }}
+              min={1}
+              max={100}
+              placeholder="1"
             />
           </FormItem>
         </div>

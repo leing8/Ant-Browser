@@ -226,6 +226,10 @@ export function BrowserProfileCopy(arg1, arg2) {
   return window['go']['main']['App']['BrowserProfileCopy'](arg1, arg2);
 }
 
+export function BrowserProfileCopyMultiple(arg1, arg2, arg3) {
+  return window['go']['main']['App']['BrowserProfileCopyMultiple'](arg1, arg2, arg3);
+}
+
 export function BrowserProfileCreate(arg1) {
   return window['go']['main']['App']['BrowserProfileCreate'](arg1);
 }

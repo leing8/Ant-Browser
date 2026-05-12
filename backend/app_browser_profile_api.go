@@ -51,6 +51,11 @@ func (a *App) BrowserProfileCopy(profileId string, newName string) (*BrowserProf
 	return a.browserMgr.Copy(profileId, newName)
 }
 
+// BrowserProfileCopyMultiple 批量复制实例（复制 count 个副本）
+func (a *App) BrowserProfileCopyMultiple(profileId string, newName string, count int) ([]*BrowserProfile, error) {
+	return a.browserMgr.CopyMultiple(profileId, newName, count)
+}
+
 // migrateToSQLite 一次性迁移：若 SQLite 表为空则从旧文件导入数据，或初始化默认数据
 // 迁移顺序：cores → proxies → profiles → bookmarks
 func (a *App) migrateToSQLite() {

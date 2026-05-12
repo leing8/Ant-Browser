@@ -1,5 +1,5 @@
-import type { BrowserProfile, BrowserProfileInput } from '../types'
-import { getBindings, getMockProfiles, nowISOString, setMockProfiles } from './runtime'
+import type {BrowserProfile, BrowserProfileInput} from '../types'
+import {getBindings, getMockProfiles, nowISOString, setMockProfiles} from './runtime'
 
 export async function fetchBrowserProfiles(): Promise<BrowserProfile[]> {
   const bindings: any = await getBindings()
@@ -107,6 +107,22 @@ export async function copyBrowserProfile(profileId: string, newName: string): Pr
   }
   setMockProfiles([copy, ...getMockProfiles()])
   return copy
+}
+
+export async function copyBrowserProfileMultiple(profileId: string, newName: string, count: number): Promise<BrowserProfile[]> {
+  const bindings: any = await getBindings()
+  if (bindings?.BrowserProfileCopyMultiple) {
+    return (await bindings.BrowserProfileCopyMultiple(profileId, newName, count)) || []
+  }
+
+  // Mock fallback: 逐个调用单个复制
+  const results: BrowserProfile[] = []
+  for (let i = 0; i < count; i++) {
+    const name = count > 1 ? `${newName}_${i + 1}` : newName
+    const copy = await copyBrowserProfile(profileId, name)
+    if (copy) results.push(copy)
+  }
+  return results
 }
 
 export async function setProfileKeywords(profileId: string, keywords: string[]): Promise<BrowserProfile | null> {
