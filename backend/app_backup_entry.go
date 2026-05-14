@@ -2,6 +2,7 @@ package backend
 
 import (
 	"ant-chrome/backend/internal/backup"
+	"ant-chrome/backend/internal/logger"
 	"fmt"
 	"strings"
 	"time"
@@ -46,8 +47,18 @@ func (a *App) BackupExportPackage() (map[string]interface{}, error) {
 		}, nil
 	}
 	savePath = backupEnsureZipSuffix(savePath)
-	a.backupEmitExportProgress("preparing", 8, "正在收集导出范围...")
 
+	// 1. 提取所有 profile 的 Cookie（在打包文件前进行，因为需要启动实例）
+	a.backupEmitExportProgress("cookies-export", 5, "正在提取实例 Cookie（保持登录状态）...")
+	cookieMap, cookieErr := a.backupExportAllProfileCookies(a.backupEmitExportProgressMeta)
+	if cookieErr != nil {
+		logger.New("Backup").Warn("Cookie 提取阶段出现错误，继续导出文件",
+			logger.F("error", cookieErr.Error()),
+		)
+	}
+
+	// 2. 收集导出范围并打包
+	a.backupEmitExportProgress("preparing", 8, "正在收集导出范围...")
 	scope, err := backup.BuildScope(backup.BuildOptions{AppRoot: a.appRoot, Config: a.config})
 	if err != nil {
 		a.backupEmitExportProgress("error", 100, fmt.Sprintf("导出失败: %v", err))
@@ -56,10 +67,15 @@ func (a *App) BackupExportPackage() (map[string]interface{}, error) {
 	manifest := backup.BuildManifest(scope, a.appName(), a.appVersion(), time.Now())
 	a.backupEmitExportProgress("preparing", 15, "开始写入备份包...")
 
-	includedEntries, skippedEntries, fileCount, err := backupWritePackageZip(savePath, scope, manifest, a.backupEmitExportProgressMeta)
+	includedEntries, skippedEntries, fileCount, err := backupWritePackageZipWithCookies(savePath, scope, manifest, cookieMap, a.backupEmitExportProgressMeta)
 	if err != nil {
 		a.backupEmitExportProgress("error", 100, fmt.Sprintf("导出失败: %v", err))
 		return nil, err
+	}
+
+	cookieCount := 0
+	for _, cookies := range cookieMap {
+		cookieCount += len(cookies)
 	}
 
 	return map[string]interface{}{
@@ -68,6 +84,8 @@ func (a *App) BackupExportPackage() (map[string]interface{}, error) {
 		"includedEntries": includedEntries,
 		"skippedEntries":  skippedEntries,
 		"fileCount":       fileCount,
+		"cookieProfiles":  len(cookieMap),
+		"cookieCount":     cookieCount,
 		"message":         "导出完成",
 	}, nil
 }

@@ -45,8 +45,13 @@ browser:
         - --disable-sync
         - --no-first-run
     default_start_urls:
-        - https://testrecaptcha.github.io/
-        - https://abrahamjuliot.github.io/creepjs/
+        - https://gemini.google.com/gems/create?hl=en-US&pli=1
+        - https://www.google.com/
+        - https://mail.google.com/
+        - https://ippure.com
+        - https://play.google.com/store/paymentmethods
+        - http://myaccount.google.com/permissions
+        - https://forms.gle/hGzM9MEUv2azZsrb9
     restore_last_session: true
     start_ready_timeout_ms: 3000
     start_stable_window_ms: 1200
@@ -58,10 +63,6 @@ browser:
         - core_id: d0e3249d-7aa4-4492-a5f6-f0276ceceb8c
           core_name: chromium-142.0.7444.175
           core_path: chrome\chromium-142.0.7444.175
-          is_default: false
-        - core_id: core-cloakbrowser-146.0.7680.177.4
-          core_name: Chrome cloakbrowser-146.0.7680.177.4
-          core_path: chrome\cloakbrowser-146.0.7680.177.4
           is_default: false
     proxies:
         - proxy_id: __direct__

@@ -194,3 +194,159 @@ func backupZipAddFile(w *zip.Writer, srcFile, archivePath string) error {
 	_, err = io.Copy(writer, in)
 	return err
 }
+
+// backupWritePackageZipWithCookies 导出 ZIP 包并附带 Cookie JSON 数据。
+// 先调用原始的文件打包逻辑，再将 Cookie 数据写入 ZIP。
+func backupWritePackageZipWithCookies(zipPath string, scope backup.Scope, manifest backup.Manifest, cookieMap map[string][]CookieInfo, emitProgress func(phase string, progress int, message string, meta *backupProgressMeta)) (int, int, int, error) {
+	emit := func(phase string, progress int, message string, meta *backupProgressMeta) {
+		if emitProgress != nil {
+			emitProgress(phase, progress, message, meta)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(zipPath), 0755); err != nil {
+		return 0, 0, 0, fmt.Errorf("创建导出目录失败: %w", err)
+	}
+	emit("writing", 18, "正在创建导出文件...", nil)
+
+	tmpPath := zipPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("创建导出文件失败: %w", err)
+	}
+	w := zip.NewWriter(f)
+
+	includedEntries := 0
+	skippedEntries := 0
+	fileCount := 0
+
+	writeErr := func() error {
+		emit("writing", 20, "正在写入备份清单...", nil)
+		manifestData, err := json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			return err
+		}
+		mw, err := w.Create("manifest.json")
+		if err != nil {
+			return err
+		}
+		if _, err := mw.Write(manifestData); err != nil {
+			return err
+		}
+		fileCount++
+
+		totalEntries := len(scope.Entries)
+		if totalEntries == 0 {
+			emit("writing", 90, "没有可导出的目录条目", nil)
+		}
+		for i, entry := range scope.Entries {
+			meta := &backupProgressMeta{
+				ComponentID:   entry.ID,
+				ComponentName: backupResolveEntryComponentName(entry),
+				EntryIndex:    i + 1,
+				EntryTotal:    totalEntries,
+			}
+			startProgress := 20 + int(float64(i)/float64(totalEntries)*60)
+			emit("writing", startProgress, fmt.Sprintf("开始处理组件 %d/%d：%s", i+1, totalEntries, meta.ComponentName), meta)
+
+			info, err := os.Stat(entry.SourcePath)
+			if err != nil {
+				if os.IsNotExist(err) && !entry.Required {
+					skippedEntries++
+					progress := 20 + int(float64(i+1)/float64(totalEntries)*60)
+					emit("writing", progress, fmt.Sprintf("组件跳过：%s（源路径不存在）", meta.ComponentName), meta)
+					continue
+				}
+				return fmt.Errorf("读取导出源失败(%s): %w", entry.ID, err)
+			}
+			entryAddedFiles := 0
+			if info.IsDir() {
+				n, err := backupZipAddDir(w, entry.SourcePath, entry.ArchivePath, zipPath)
+				if err != nil {
+					return fmt.Errorf("写入目录失败(%s): %w", entry.ID, err)
+				}
+				fileCount += n
+				entryAddedFiles = n
+			} else {
+				if backupSamePath(entry.SourcePath, zipPath) {
+					skippedEntries++
+					progress := 20 + int(float64(i+1)/float64(totalEntries)*60)
+					emit("writing", progress, fmt.Sprintf("组件跳过：%s（导出文件本身）", meta.ComponentName), meta)
+					continue
+				}
+				if err := backupZipAddFile(w, entry.SourcePath, strings.TrimSuffix(entry.ArchivePath, "/")); err != nil {
+					return fmt.Errorf("写入文件失败(%s): %w", entry.ID, err)
+				}
+				fileCount++
+				entryAddedFiles = 1
+			}
+			includedEntries++
+			progress := 20 + int(float64(i+1)/float64(totalEntries)*60)
+			emit("writing", progress, fmt.Sprintf("组件完成：%s（新增 %d 个文件）", meta.ComponentName, entryAddedFiles), meta)
+		}
+
+		// 写入 Cookie JSON 文件
+		if len(cookieMap) > 0 {
+			emit("writing", 85, fmt.Sprintf("正在写入 Cookie 数据（%d 个实例）...", len(cookieMap)), nil)
+			cookieFiles, err := backupWriteCookieEntriesToZip(w, cookieMap)
+			if err != nil {
+				return fmt.Errorf("写入 Cookie 数据失败: %w", err)
+			}
+			fileCount += cookieFiles
+			emit("writing", 88, fmt.Sprintf("Cookie 数据写入完成（%d 个文件）", cookieFiles), nil)
+		}
+
+		return nil
+	}()
+
+	closeErr := w.Close()
+	fileCloseErr := f.Close()
+	if writeErr != nil {
+		emit("error", 100, writeErr.Error(), nil)
+		_ = os.Remove(tmpPath)
+		return 0, 0, 0, writeErr
+	}
+	if closeErr != nil {
+		emit("error", 100, closeErr.Error(), nil)
+		_ = os.Remove(tmpPath)
+		return 0, 0, 0, closeErr
+	}
+	if fileCloseErr != nil {
+		emit("error", 100, fileCloseErr.Error(), nil)
+		_ = os.Remove(tmpPath)
+		return 0, 0, 0, fileCloseErr
+	}
+	if err := os.Rename(tmpPath, zipPath); err != nil {
+		emit("error", 100, err.Error(), nil)
+		_ = os.Remove(tmpPath)
+		return 0, 0, 0, fmt.Errorf("写入导出文件失败: %w", err)
+	}
+	emit("done", 100, "导出完成", nil)
+	return includedEntries, skippedEntries, fileCount, nil
+}
+
+// backupWriteCookieEntriesToZip 将 Cookie JSON 数据写入 ZIP 包。
+// 路径格式：payload/browser/cookies/<profileId>.json
+func backupWriteCookieEntriesToZip(w *zip.Writer, cookieMap map[string][]CookieInfo) (int, error) {
+	fileCount := 0
+	for profileId, cookies := range cookieMap {
+		if len(cookies) == 0 {
+			continue
+		}
+
+		data, err := backupSerializeCookiesToJSON(cookies)
+		if err != nil {
+			continue
+		}
+
+		archivePath := fmt.Sprintf("payload/browser/cookies/%s.json", profileId)
+		cw, err := w.Create(archivePath)
+		if err != nil {
+			return fileCount, fmt.Errorf("创建 Cookie 文件失败 (%s): %w", profileId, err)
+		}
+		if _, err := cw.Write(data); err != nil {
+			return fileCount, fmt.Errorf("写入 Cookie 数据失败 (%s): %w", profileId, err)
+		}
+		fileCount++
+	}
+	return fileCount, nil
+}
