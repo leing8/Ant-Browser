@@ -17,17 +17,29 @@ type BrowserCore = browser.Core
 type BrowserCoreInput = browser.CoreInput
 type BrowserCoreValidateResult = browser.CoreValidateResult
 type BrowserCoreExtendedInfo = browser.CoreExtendedInfo
+type BrowserProfileCopyOptions = browser.ProfileCopyOptions
 
 // BrowserProfileList 获取所有实例列表
-func (a *App) BrowserProfileList() []BrowserProfile { return a.browserMgr.List() }
+func (a *App) BrowserProfileList() []BrowserProfile {
+	if a == nil || a.browserMgr == nil {
+		return []BrowserProfile{}
+	}
+	return a.browserMgr.List()
+}
 
 // BrowserProfileListByTag 按标签筛选实例列表
 func (a *App) BrowserProfileListByTag(tag string) []BrowserProfile {
+	if a == nil || a.browserMgr == nil {
+		return []BrowserProfile{}
+	}
 	return a.browserMgr.ListByTag(tag)
 }
 
 // BrowserGetAllTags 获取所有已使用的标签
 func (a *App) BrowserGetAllTags() []string {
+	if a == nil || a.browserMgr == nil {
+		return []string{}
+	}
 	return a.browserMgr.GetAllTags()
 }
 
@@ -46,6 +58,22 @@ func (a *App) BrowserProfileUpdate(profileId string, input BrowserProfileInput) 
 
 func (a *App) BrowserProfileDelete(profileId string) error { return a.browserMgr.Delete(profileId) }
 
+// BrowserProfileTrashList 获取回收站实例列表
+func (a *App) BrowserProfileTrashList() []BrowserProfile { return a.browserMgr.ListDeleted() }
+
+// BrowserProfileRestore 从回收站恢复实例
+func (a *App) BrowserProfileRestore(profileId string) (*BrowserProfile, error) {
+	return a.browserMgr.Restore(profileId)
+}
+
+// BrowserProfilePermanentlyDelete 从回收站彻底删除实例
+func (a *App) BrowserProfilePermanentlyDelete(profileId string) error {
+	return a.browserMgr.PermanentlyDelete(profileId)
+}
+
+// BrowserProfileTrashCleanup 清理超过保留期的回收站实例
+func (a *App) BrowserProfileTrashCleanup() error { return a.browserMgr.CleanupExpiredTrash() }
+
 // BrowserProfileCopy 复制实例配置（除指纹参数外全部复制）
 func (a *App) BrowserProfileCopy(profileId string, newName string) (*BrowserProfile, error) {
 	return a.browserMgr.Copy(profileId, newName)
@@ -54,6 +82,16 @@ func (a *App) BrowserProfileCopy(profileId string, newName string) (*BrowserProf
 // BrowserProfileCopyMultiple 批量复制实例（复制 count 个副本）
 func (a *App) BrowserProfileCopyMultiple(profileId string, newName string, count int) ([]*BrowserProfile, error) {
 	return a.browserMgr.CopyMultiple(profileId, newName, count)
+}
+
+// BrowserProfileCopyWithMode 按模式复制实例配置。
+func (a *App) BrowserProfileCopyWithMode(profileId string, newName string, mode string) (*BrowserProfile, error) {
+	return a.browserMgr.CopyWithMode(profileId, newName, mode)
+}
+
+// BrowserProfileCopyWithOptions 按结构化选项复制实例配置。
+func (a *App) BrowserProfileCopyWithOptions(profileId string, newName string, options BrowserProfileCopyOptions) (*BrowserProfile, error) {
+	return a.browserMgr.CopyWithOptions(profileId, newName, options)
 }
 
 // migrateToSQLite 一次性迁移：若 SQLite 表为空则从旧文件导入数据，或初始化默认数据

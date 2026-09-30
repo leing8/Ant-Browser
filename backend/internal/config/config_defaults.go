@@ -9,6 +9,30 @@ import (
 
 var defaultBrowserStartURLs = []string{}
 
+const (
+	// BrowserConnectorXray 表示 Xray + sing-box 组合连接栈。
+	BrowserConnectorXray = "xray"
+	// BrowserConnectorMihomo 表示独立 Mihomo 连接栈。
+	BrowserConnectorMihomo = "mihomo"
+)
+
+const (
+	BrowserConnectorXrayStack   = BrowserConnectorXray
+	BrowserConnectorMihomoStack = BrowserConnectorMihomo
+)
+
+// NormalizeBrowserConnectorType 规范化连接栈配置。
+func NormalizeBrowserConnectorType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case BrowserConnectorMihomo, "clash", "clash-meta":
+		return BrowserConnectorMihomo
+	case BrowserConnectorXray, "sing-box", "singbox", "sing_box", "":
+		return BrowserConnectorXray
+	default:
+		return BrowserConnectorXray
+	}
+}
+
 func DefaultBrowserStartURLs() []string {
 	return append([]string{}, defaultBrowserStartURLs...)
 }
@@ -39,15 +63,6 @@ func normalizeConfig(config *Config) {
 	if config.App.Window.MinHeight <= 0 {
 		config.App.Window.MinHeight = defaultConfig.App.Window.MinHeight
 	}
-	if config.App.UsedCDKeys == nil {
-		config.App.UsedCDKeys = []string{}
-	}
-
-	expectedLimit := MinimumProfileLimitForUsedKeys(config.App.UsedCDKeys)
-	if config.App.MaxProfileLimit < expectedLimit {
-		config.App.MaxProfileLimit = expectedLimit
-	}
-
 	if config.Runtime.MaxMemoryMB <= 0 {
 		config.Runtime.MaxMemoryMB = defaultConfig.Runtime.MaxMemoryMB
 	}
@@ -101,6 +116,8 @@ func normalizeConfig(config *Config) {
 	}
 	if len(config.Browser.DefaultFingerprintArgs) == 0 {
 		config.Browser.DefaultFingerprintArgs = append([]string{}, defaultConfig.Browser.DefaultFingerprintArgs...)
+	} else if isLegacyMinimalDefaultFingerprintArgs(config.Browser.DefaultFingerprintArgs) {
+		config.Browser.DefaultFingerprintArgs = appendEffectiveRuntimeFingerprintArgs(config.Browser.DefaultFingerprintArgs)
 	}
 	if len(config.Browser.DefaultLaunchArgs) == 0 {
 		config.Browser.DefaultLaunchArgs = append([]string{}, defaultConfig.Browser.DefaultLaunchArgs...)
@@ -110,12 +127,16 @@ func normalizeConfig(config *Config) {
 	} else if isLegacyVerificationStartURLs(config.Browser.DefaultStartURLs) {
 		config.Browser.DefaultStartURLs = []string{}
 	}
+	if config.Browser.LightStartEnabled == nil {
+		config.Browser.LightStartEnabled = defaultConfig.Browser.LightStartEnabled
+	}
 	if config.Browser.StartReadyTimeoutMs <= 0 {
 		config.Browser.StartReadyTimeoutMs = defaultConfig.Browser.StartReadyTimeoutMs
 	}
 	if config.Browser.StartStableWindowMs <= 0 {
 		config.Browser.StartStableWindowMs = defaultConfig.Browser.StartStableWindowMs
 	}
+	config.Browser.DefaultConnectorType = NormalizeBrowserConnectorType(config.Browser.DefaultConnectorType)
 	if config.Browser.DefaultBookmarks == nil {
 		config.Browser.DefaultBookmarks = []BrowserBookmark{}
 	}
@@ -149,11 +170,40 @@ func normalizeConfig(config *Config) {
 		config.LaunchServer.Auth.Header = defaultConfig.LaunchServer.Auth.Header
 	}
 
+	if strings.TrimSpace(config.Backup.Channels.OpenList.BaseURL) != "" {
+		config.Backup.Channels.OpenList.BaseURL = strings.TrimSpace(config.Backup.Channels.OpenList.BaseURL)
+	}
+	if strings.TrimSpace(config.Backup.Channels.OpenList.RemotePath) == "" {
+		config.Backup.Channels.OpenList.RemotePath = defaultConfig.Backup.Channels.OpenList.RemotePath
+	} else {
+		config.Backup.Channels.OpenList.RemotePath = strings.TrimSpace(config.Backup.Channels.OpenList.RemotePath)
+	}
+	config.Backup.Channels.OpenList.Token = strings.TrimSpace(config.Backup.Channels.OpenList.Token)
+	if config.Backup.Channels.OpenList.UploadRateLimitMBps < 0 {
+		config.Backup.Channels.OpenList.UploadRateLimitMBps = defaultConfig.Backup.Channels.OpenList.UploadRateLimitMBps
+	}
+	config.Backup.Channels.S3.Endpoint = strings.TrimSpace(config.Backup.Channels.S3.Endpoint)
+	config.Backup.Channels.S3.Region = strings.TrimSpace(config.Backup.Channels.S3.Region)
+	if config.Backup.Channels.S3.Region == "" {
+		config.Backup.Channels.S3.Region = defaultConfig.Backup.Channels.S3.Region
+	}
+	config.Backup.Channels.S3.Bucket = strings.TrimSpace(config.Backup.Channels.S3.Bucket)
+	config.Backup.Channels.S3.Prefix = strings.TrimSpace(config.Backup.Channels.S3.Prefix)
+	config.Backup.Channels.S3.AccessKeyID = strings.TrimSpace(config.Backup.Channels.S3.AccessKeyID)
+	config.Backup.Channels.S3.SecretAccessKey = strings.TrimSpace(config.Backup.Channels.S3.SecretAccessKey)
+	config.Backup.Channels.S3.SessionToken = strings.TrimSpace(config.Backup.Channels.S3.SessionToken)
+	if strings.TrimSpace(config.Backup.Schedule.DailyTime) == "" {
+		config.Backup.Schedule.DailyTime = defaultConfig.Backup.Schedule.DailyTime
+	} else {
+		config.Backup.Schedule.DailyTime = strings.TrimSpace(config.Backup.Schedule.DailyTime)
+	}
+
 	automationUnset := !config.Automation.Enabled &&
 		!config.Automation.HeadlessDefault &&
 		!config.Automation.KeepRuntimeOnDisable &&
 		strings.TrimSpace(config.Automation.InstallPolicy) == "" &&
 		strings.TrimSpace(config.Automation.RuntimeVersion) == "" &&
+		strings.TrimSpace(config.Automation.ArtifactsDir) == "" &&
 		strings.TrimSpace(config.Automation.NodeSource) == "" &&
 		strings.TrimSpace(config.Automation.SystemNodePath) == "" &&
 		strings.TrimSpace(config.Automation.NodeVersion) == "" &&
@@ -169,6 +219,11 @@ func normalizeConfig(config *Config) {
 		}
 		if strings.TrimSpace(config.Automation.PlaywrightCoreVersion) == "" {
 			config.Automation.PlaywrightCoreVersion = defaultConfig.Automation.PlaywrightCoreVersion
+		}
+		if strings.TrimSpace(config.Automation.ArtifactsDir) == "" {
+			config.Automation.ArtifactsDir = defaultConfig.Automation.ArtifactsDir
+		} else {
+			config.Automation.ArtifactsDir = strings.TrimSpace(config.Automation.ArtifactsDir)
 		}
 		config.Automation.NodeSource = normalizeAutomationNodeSource(config.Automation.NodeSource)
 		config.Automation.SystemNodePath = strings.TrimSpace(config.Automation.SystemNodePath)
@@ -221,8 +276,6 @@ func DefaultConfig() *Config {
 				MinWidth:  1200,
 				MinHeight: 700,
 			},
-			MaxProfileLimit: DefaultMaxProfileLimit,
-			UsedCDKeys:      []string{},
 		},
 		Runtime: RuntimeConfig{
 			MaxMemoryMB: 0,
@@ -233,9 +286,11 @@ func DefaultConfig() *Config {
 			DefaultFingerprintArgs: defaultFingerprintArgsForOS(goruntime.GOOS),
 			DefaultLaunchArgs:      []string{"--disable-sync", "--no-first-run"},
 			DefaultStartURLs:       DefaultBrowserStartURLs(),
+			LightStartEnabled:      boolPtr(true),
 			RestoreLastSession:     false,
 			StartReadyTimeoutMs:    3000,
 			StartStableWindowMs:    1200,
+			DefaultConnectorType:   BrowserConnectorXray,
 		},
 		ProxyCheck: ProxyCheckConfig{
 			BridgeStartTimeoutMs: 15000,
@@ -280,10 +335,25 @@ func DefaultConfig() *Config {
 			HeadlessDefault:       false,
 			KeepRuntimeOnDisable:  true,
 			AllowTypeScriptBuild:  false,
+			ArtifactsDir:          "data/automation/artifacts",
 			NodeSource:            DefaultAutomationNodeSource,
 			SystemNodePath:        "",
 			NodeVersion:           DefaultAutomationNodeVersion,
 			PlaywrightCoreVersion: DefaultAutomationPWVersion,
+		},
+		Backup: BackupConfig{
+			Channels: BackupChannelsConfig{
+				OpenList: OpenListChannelConfig{
+					RemotePath: "ant-chrome/backups",
+				},
+				S3: S3ChannelConfig{
+					Region: "us-east-1",
+				},
+			},
+			Schedule: BackupScheduleConfig{
+				Enabled:   false,
+				DailyTime: "02:00",
+			},
 		},
 	}
 }
@@ -296,7 +366,55 @@ func defaultFingerprintArgsForOS(goos string) []string {
 	case "linux":
 		platform = "linux"
 	}
-	return []string{"--fingerprint-brand=Chrome", "--fingerprint-platform=" + platform}
+	return []string{
+		"--fingerprint-brand=Chrome",
+		"--fingerprint-platform=" + platform,
+		"--disable-non-proxied-udp",
+		"--fingerprinting-canvas-image-data-noise",
+		"--fingerprinting-client-rects-noise",
+	}
+}
+
+func isLegacyMinimalDefaultFingerprintArgs(args []string) bool {
+	if len(args) != 2 {
+		return false
+	}
+	hasBrand := false
+	hasPlatform := false
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if strings.HasPrefix(trimmed, "--fingerprint-brand=") {
+			hasBrand = true
+		}
+		if strings.HasPrefix(trimmed, "--fingerprint-platform=") {
+			hasPlatform = true
+		}
+	}
+	return hasBrand && hasPlatform
+}
+
+func appendEffectiveRuntimeFingerprintArgs(args []string) []string {
+	defaultRuntimeArgs := []string{
+		"--disable-non-proxied-udp",
+		"--fingerprinting-canvas-image-data-noise",
+		"--fingerprinting-client-rects-noise",
+	}
+	out := append([]string{}, args...)
+	for _, defaultArg := range defaultRuntimeArgs {
+		if !containsFingerprintArg(out, defaultArg) {
+			out = append(out, defaultArg)
+		}
+	}
+	return out
+}
+
+func containsFingerprintArg(args []string, expected string) bool {
+	for _, arg := range args {
+		if strings.TrimSpace(arg) == expected {
+			return true
+		}
+	}
+	return false
 }
 func DefaultAutomationRuntimeVersion(nodeVersion, playwrightVersion string) string {
 	return fmt.Sprintf("node-%s-playwright-core-%s", strings.TrimSpace(nodeVersion), strings.TrimSpace(playwrightVersion))
@@ -311,4 +429,9 @@ func normalizeAutomationNodeSource(value string) string {
 	default:
 		return AutomationNodeSourceAuto
 	}
+}
+
+func boolPtr(value bool) *bool {
+	v := value
+	return &v
 }

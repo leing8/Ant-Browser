@@ -142,6 +142,123 @@ var migrations = []migration{
 			`ALTER TABLE browser_bookmarks ADD COLUMN open_on_start INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		version: 8,
+		desc:    "添加 Chrome 插件包管理表",
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS browser_extensions (
+				extension_id  TEXT PRIMARY KEY,
+				name          TEXT NOT NULL,
+				version       TEXT NOT NULL DEFAULT '',
+				description   TEXT NOT NULL DEFAULT '',
+				manifest_json TEXT NOT NULL DEFAULT '{}',
+				source_url    TEXT NOT NULL DEFAULT '',
+				install_dir   TEXT NOT NULL,
+				enabled       INTEGER NOT NULL DEFAULT 1,
+				installed_at  TEXT NOT NULL DEFAULT '',
+				updated_at    TEXT NOT NULL DEFAULT ''
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_browser_extensions_enabled ON browser_extensions(enabled)`,
+		},
+	},
+	{
+		version: 9,
+		desc:    "添加实例插件绑定表",
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS browser_profile_extension_settings (
+				profile_id  TEXT PRIMARY KEY,
+				configured  INTEGER NOT NULL DEFAULT 0,
+				updated_at  TEXT NOT NULL DEFAULT ''
+			)`,
+			`CREATE TABLE IF NOT EXISTS browser_profile_extensions (
+				profile_id    TEXT NOT NULL,
+				extension_id  TEXT NOT NULL,
+				enabled       INTEGER NOT NULL DEFAULT 1,
+				created_at    TEXT NOT NULL DEFAULT '',
+				updated_at    TEXT NOT NULL DEFAULT '',
+				PRIMARY KEY (profile_id, extension_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_browser_profile_extensions_profile ON browser_profile_extensions(profile_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_browser_profile_extensions_extension ON browser_profile_extensions(extension_id)`,
+		},
+	},
+	{
+		version: 10,
+		desc:    "插件表添加图标缓存字段",
+		stmts: []string{
+			`ALTER TABLE browser_extensions ADD COLUMN icon_data_url TEXT NOT NULL DEFAULT ''`,
+		},
+	},
+	{
+		version: 11,
+		desc:    "实例表添加回收站字段",
+		stmts: []string{
+			`ALTER TABLE browser_profiles ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX IF NOT EXISTS idx_browser_profiles_deleted_at ON browser_profiles(deleted_at)`,
+		},
+	},
+	{
+		version: 12,
+		desc:    "代理表添加指定内核字段",
+		stmts: []string{
+			`ALTER TABLE browser_proxies ADD COLUMN preferred_kernel TEXT NOT NULL DEFAULT ''`,
+		},
+	},
+	{
+		version: 13,
+		desc:    "实例表添加历史标签恢复覆盖字段",
+		stmts: []string{
+			`ALTER TABLE browser_profiles ADD COLUMN restore_last_session TEXT NOT NULL DEFAULT ''`,
+		},
+	},
+	{
+		version: 14,
+		desc:    "实例表添加内存限制字段",
+		stmts: []string{
+			`ALTER TABLE browser_profiles ADD COLUMN memory_limit_mb INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		version: 15,
+		desc:    "插件包持久安装与实例运行态",
+		stmts: []string{
+			`ALTER TABLE browser_extensions ADD COLUMN install_mode TEXT NOT NULL DEFAULT 'persistent'`,
+			`ALTER TABLE browser_extensions ADD COLUMN package_path TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE browser_extensions ADD COLUMN package_hash TEXT NOT NULL DEFAULT ''`,
+			`CREATE TABLE IF NOT EXISTS browser_profile_extension_runtime (
+				profile_id           TEXT NOT NULL,
+				extension_id         TEXT NOT NULL,
+				runtime_extension_id TEXT NOT NULL DEFAULT '',
+				install_mode         TEXT NOT NULL DEFAULT 'persistent',
+				installed_version    TEXT NOT NULL DEFAULT '',
+				package_hash         TEXT NOT NULL DEFAULT '',
+				status               TEXT NOT NULL DEFAULT '',
+				backup_path          TEXT NOT NULL DEFAULT '',
+				last_verified_at     TEXT NOT NULL DEFAULT '',
+				last_error           TEXT NOT NULL DEFAULT '',
+				created_at           TEXT NOT NULL DEFAULT '',
+				updated_at           TEXT NOT NULL DEFAULT '',
+				PRIMARY KEY (profile_id, extension_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_browser_profile_extension_runtime_profile ON browser_profile_extension_runtime(profile_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_browser_profile_extension_runtime_extension ON browser_profile_extension_runtime(extension_id)`,
+		},
+	},
+	{
+		version: 16,
+		desc:    "插件默认安装策略",
+		stmts: []string{
+			`ALTER TABLE browser_extensions ADD COLUMN default_install INTEGER NOT NULL DEFAULT 0`,
+			`CREATE INDEX IF NOT EXISTS idx_browser_extensions_default_install ON browser_extensions(default_install)`,
+		},
+	},
+	{
+		version: 17,
+		desc:    "清理历史插件默认安装误标",
+		stmts: []string{
+			`UPDATE browser_extensions SET default_install = 0`,
+		},
+	},
 	// ── 新版本在此追加，格式：
 	// {
 	//     version: 4,

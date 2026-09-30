@@ -11,7 +11,6 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { Badge, Button, Card } from '../../shared/components'
 import { createDefaultProfilePageData, loadProfilePageData } from './api'
 import type { IconKey, ProfilePageData } from './types'
@@ -34,8 +33,6 @@ const CHANNEL_ICON_CLASS: Partial<Record<IconKey, string>> = {
 }
 
 export function ProfilePage() {
-  const navigate = useNavigate()
-  const [clickCount, setClickCount] = useState(0)
   const [pageData, setPageData] = useState<ProfilePageData>(() => createDefaultProfilePageData())
 
   useEffect(() => {
@@ -53,15 +50,6 @@ export function ProfilePage() {
       active = false
     }
   }, [])
-
-  const handleAuthorClick = () => {
-    const newCount = clickCount + 1
-    setClickCount(newCount)
-    if (newCount >= 5) {
-      navigate('/admin/keygen')
-      setClickCount(0)
-    }
-  }
 
   const openExternal = (url: string) => {
     window.open(url, '_blank', 'noopener,noreferrer')
@@ -81,10 +69,10 @@ export function ProfilePage() {
   ].filter((item) => item.label.trim())
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 animate-fade-in">
+    <div className="mx-auto max-w-5xl space-y-4 animate-fade-in">
       <Card padding="lg" className="rounded-[26px]">
-        <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-          <div className="flex min-w-0 flex-col gap-5 sm:flex-row sm:items-start">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start">
             <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-[20px] bg-[#1f2d46] text-[34px] font-bold tracking-[0.08em] text-white shadow-sm">
               {authorInfo.initial}
             </div>
@@ -92,9 +80,7 @@ export function ProfilePage() {
             <div className="min-w-0 space-y-4">
               <div className="space-y-1">
                 <h1
-                  className="cursor-pointer select-none text-[34px] font-bold leading-none tracking-tight text-[var(--color-text-primary)] sm:text-[38px]"
-                  onClick={handleAuthorClick}
-                  title={clickCount > 0 ? `再点 ${5 - clickCount} 次进入开发者模式` : ''}
+                  className="text-[34px] font-bold leading-none tracking-tight text-[var(--color-text-primary)] sm:text-[38px]"
                 >
                   {authorInfo.name}
                 </h1>
@@ -151,7 +137,7 @@ export function ProfilePage() {
               padding="lg"
             >
               <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-5">
+                <div className="flex items-center gap-4">
                   <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--color-bg-muted)]">
                     <Icon className={`h-5 w-5 ${iconClassName}`} />
                   </div>

@@ -1,13 +1,12 @@
 package config
 
-import "strings"
+import (
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
 
 const (
-	DefaultMaxProfileLimit          = 20
-	StandardCDKeyProfileBonus       = 10
-	GithubStarRewardKey             = "GITHUB_STAR_REWARD"
-	GithubStarProfileBonus          = 50
-	GithubStarProfileTotal          = DefaultMaxProfileLimit + GithubStarProfileBonus
 	DefaultLaunchServerPort         = 19876
 	DefaultLaunchServerAPIKeyHeader = "X-Ant-Api-Key"
 	DefaultAutomationInstallPolicy  = "on_demand"
@@ -21,36 +20,6 @@ const (
 	AutomationNodeSourceSystem  = "system"
 	AutomationNodeSourceBundled = "bundled"
 )
-
-// RewardForUsedKey 返回指定兑换记录对应的永久额度奖励。
-func RewardForUsedKey(key string) int {
-	normalized := strings.ToUpper(strings.TrimSpace(key))
-	if normalized == "" {
-		return 0
-	}
-	if normalized == GithubStarRewardKey {
-		return GithubStarProfileBonus
-	}
-	return StandardCDKeyProfileBonus
-}
-
-// MinimumProfileLimitForUsedKeys 根据兑换记录计算最低应得实例额度。
-func MinimumProfileLimitForUsedKeys(keys []string) int {
-	limit := DefaultMaxProfileLimit
-	seen := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		normalized := strings.ToUpper(strings.TrimSpace(key))
-		if normalized == "" {
-			continue
-		}
-		if _, exists := seen[normalized]; exists {
-			continue
-		}
-		seen[normalized] = struct{}{}
-		limit += RewardForUsedKey(normalized)
-	}
-	return limit
-}
 
 // LaunchServerConfig Launch HTTP 服务配置
 type LaunchServerConfig struct {
@@ -71,6 +40,7 @@ type AutomationConfig struct {
 	HeadlessDefault       bool   `yaml:"headless_default,omitempty"`
 	KeepRuntimeOnDisable  bool   `yaml:"keep_runtime_on_disable,omitempty"`
 	AllowTypeScriptBuild  bool   `yaml:"allow_typescript_build,omitempty"`
+	ArtifactsDir          string `yaml:"artifacts_dir,omitempty"`
 	NodeSource            string `yaml:"node_source,omitempty"`
 	SystemNodePath        string `yaml:"system_node_path,omitempty"`
 	NodeVersion           string `yaml:"node_version,omitempty"`
@@ -87,6 +57,7 @@ type Config struct {
 	ProxyCheck   ProxyCheckConfig   `yaml:"proxy_check"`
 	LaunchServer LaunchServerConfig `yaml:"launch_server"`
 	Automation   AutomationConfig   `yaml:"automation"`
+	Backup       BackupConfig       `yaml:"backup"`
 }
 
 type ProxyCheckConfig struct {
@@ -115,11 +86,76 @@ type SQLiteConfig struct {
 	Path string `yaml:"path"`
 }
 
+type BackupConfig struct {
+	LocalDirectory string               `yaml:"local_directory,omitempty"`
+	Channels       BackupChannelsConfig `yaml:"channels"`
+	Schedule       BackupScheduleConfig `yaml:"schedule"`
+}
+
+type BackupChannelsConfig struct {
+	OpenList OpenListChannelConfig `yaml:"openlist"`
+	S3       S3ChannelConfig       `yaml:"s3,omitempty"`
+}
+
+type OpenListChannelConfig struct {
+	BaseURL             string `yaml:"base_url,omitempty"`
+	RemotePath          string `yaml:"remote_path,omitempty"`
+	Token               string `yaml:"token,omitempty"`
+	UploadRateLimitMBps int    `yaml:"upload_rate_limit_mbps,omitempty"`
+}
+
+type S3ChannelConfig struct {
+	Endpoint        string `yaml:"endpoint,omitempty"`
+	Region          string `yaml:"region,omitempty"`
+	Bucket          string `yaml:"bucket,omitempty"`
+	Prefix          string `yaml:"prefix,omitempty"`
+	AccessKeyID     string `yaml:"access_key_id,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key,omitempty"`
+	SessionToken    string `yaml:"session_token,omitempty"`
+	ForcePathStyle  bool   `yaml:"force_path_style,omitempty"`
+}
+
+func (c *BackupConfig) UnmarshalYAML(node *yaml.Node) error {
+	var decoded struct {
+		LocalDirectory string                `yaml:"local_directory"`
+		Channels       BackupChannelsConfig  `yaml:"channels"`
+		OpenList       OpenListChannelConfig `yaml:"openlist"`
+		Schedule       BackupScheduleConfig  `yaml:"schedule"`
+	}
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+
+	channels := decoded.Channels
+	openList := channels.OpenList
+	if strings.TrimSpace(openList.BaseURL) == "" {
+		openList.BaseURL = decoded.OpenList.BaseURL
+	}
+	if strings.TrimSpace(openList.RemotePath) == "" {
+		openList.RemotePath = decoded.OpenList.RemotePath
+	}
+	if strings.TrimSpace(openList.Token) == "" {
+		openList.Token = decoded.OpenList.Token
+	}
+	if openList.UploadRateLimitMBps == 0 {
+		openList.UploadRateLimitMBps = decoded.OpenList.UploadRateLimitMBps
+	}
+	channels.OpenList = openList
+	c.LocalDirectory = strings.TrimSpace(decoded.LocalDirectory)
+	c.Channels = channels
+	c.Schedule = decoded.Schedule
+	return nil
+}
+
+type BackupScheduleConfig struct {
+	Enabled           bool     `yaml:"enabled"`
+	DailyTime         string   `yaml:"daily_time"`
+	RecentBackupTimes []string `yaml:"recent_backup_times,omitempty"`
+}
+
 type AppConfig struct {
-	Name            string       `yaml:"name"`
-	Window          WindowConfig `yaml:"window"`
-	MaxProfileLimit int          `yaml:"max_profile_limit"`
-	UsedCDKeys      []string     `yaml:"used_cd_keys"`
+	Name   string       `yaml:"name"`
+	Window WindowConfig `yaml:"window"`
 }
 
 type WindowConfig struct {
@@ -145,6 +181,7 @@ type BrowserConfig struct {
 	DefaultFingerprintArgs []string               `yaml:"default_fingerprint_args"`
 	DefaultLaunchArgs      []string               `yaml:"default_launch_args"`
 	DefaultStartURLs       []string               `yaml:"default_start_urls"`
+	LightStartEnabled      *bool                  `yaml:"light_start_enabled,omitempty"`
 	RestoreLastSession     bool                   `yaml:"restore_last_session"`
 	StartReadyTimeoutMs    int                    `yaml:"start_ready_timeout_ms,omitempty"`
 	StartStableWindowMs    int                    `yaml:"start_stable_window_ms,omitempty"`
@@ -173,6 +210,7 @@ type BrowserProxy struct {
 	ProxyId                string `yaml:"proxy_id" json:"proxyId"`
 	ProxyName              string `yaml:"proxy_name" json:"proxyName"`
 	ProxyConfig            string `yaml:"proxy_config" json:"proxyConfig"`
+	PreferredKernel        string `yaml:"preferred_kernel,omitempty" json:"preferredKernel,omitempty"`
 	DnsServers             string `yaml:"dns_servers,omitempty" json:"dnsServers,omitempty"`
 	GroupName              string `yaml:"group_name,omitempty" json:"groupName,omitempty"`
 	SortOrder              int    `yaml:"sort_order,omitempty" json:"sortOrder,omitempty"`
@@ -202,6 +240,7 @@ type BrowserProfileConfig struct {
 	ProfileName        string   `yaml:"profile_name" json:"profileName"`
 	UserDataDir        string   `yaml:"user_data_dir" json:"userDataDir"`
 	CoreId             string   `yaml:"core_id" json:"coreId"`
+	RestoreLastSession string   `yaml:"restore_last_session,omitempty" json:"restoreLastSession,omitempty"`
 	FingerprintArgs    []string `yaml:"fingerprint_args" json:"fingerprintArgs"`
 	ProxyId            string   `yaml:"proxy_id" json:"proxyId"`
 	ProxyConfig        string   `yaml:"proxy_config" json:"proxyConfig"`
@@ -209,6 +248,7 @@ type BrowserProfileConfig struct {
 	ProxyBindSourceURL string   `yaml:"proxy_bind_source_url,omitempty" json:"proxyBindSourceUrl,omitempty"`
 	ProxyBindName      string   `yaml:"proxy_bind_name,omitempty" json:"proxyBindName,omitempty"`
 	ProxyBindUpdatedAt string   `yaml:"proxy_bind_updated_at,omitempty" json:"proxyBindUpdatedAt,omitempty"`
+	MemoryLimitMB      int      `yaml:"memory_limit_mb,omitempty" json:"memoryLimitMb,omitempty"`
 	LaunchArgs         []string `yaml:"launch_args" json:"launchArgs"`
 	Tags               []string `yaml:"tags" json:"tags"`
 	Keywords           []string `yaml:"keywords,omitempty" json:"keywords,omitempty"`

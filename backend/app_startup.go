@@ -11,6 +11,7 @@ import (
 	"ant-chrome/backend/internal/proxy"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 
 // startup 应用启动时调用
 func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
+	a.setRuntimeContext(ctx)
 	if err := apppath.EnsureWritableLayout(a.appRoot); err != nil {
 		runtime.LogFatal(ctx, fmt.Sprintf("初始化 Linux 用户数据目录失败: %v", err))
 		return
@@ -30,7 +31,14 @@ func (a *App) startup(ctx context.Context) {
 	a.applyRuntimeConfig(cfg.Runtime)
 
 	log := a.startupInitLogger(ctx, cfg)
+	if err := killResidualRuntimeProcesses(a.appRoot); err != nil {
+		log.Warn("清理上次异常退出遗留的代理进程失败", logger.F("error", err))
+	}
 	a.startupLogEnvironment(log, cfg)
+	a.activateStableBackupLocalConfig()
+	if err := a.prepareBackupLocalConfig(); err != nil {
+		log.Error("本地备份配置初始化失败", logger.F("error", err))
+	}
 
 	if err := os.MkdirAll(a.resolveAppPath("data"), 0o755); err != nil {
 		log.Error("创建 data 目录失败", logger.F("error", err))
@@ -56,6 +64,8 @@ func (a *App) startup(ctx context.Context) {
 	a.startupInitAutomation()
 	a.startupInitBridgeHooks()
 	a.startupInitSpeedScheduler()
+	a.startupInitBackupScheduler()
+	a.emitRuntimeEvent("app:ready")
 
 	log.Info("应用启动成功")
 }
@@ -122,9 +132,14 @@ func (a *App) startupInitDatabase(cfg *config.Config) (*database.DB, error) {
 
 func (a *App) startupInitManagers(cfg *config.Config, db *database.DB) {
 	a.browserMgr = browser.NewManager(cfg, a.appRoot)
+	a.browserMgr.EventEmitter = a.emitRuntimeEvent
 	a.xrayMgr = proxy.NewXrayManager(cfg, a.appRoot)
 	a.clashMgr = proxy.NewClashManager(cfg, a.appRoot)
 	a.singboxMgr = proxy.NewSingBoxManager(cfg, a.appRoot)
+	a.browserMgr.CoreDownloadHTTPClientFactory = func(proxyConfig string, timeout time.Duration) (*http.Client, error) {
+		client, _, err := a.unifiedProxyCoreHTTPClient(timeout, proxyConfig)
+		return client, err
+	}
 
 	conn := db.GetConn()
 	a.browserMgr.ProfileDAO = browser.NewSQLiteProfileDAO(conn)
@@ -132,10 +147,14 @@ func (a *App) startupInitManagers(cfg *config.Config, db *database.DB) {
 	a.browserMgr.CoreDAO = browser.NewSQLiteCoreDAO(conn)
 	a.browserMgr.BookmarkDAO = browser.NewSQLiteBookmarkDAO(conn)
 	a.browserMgr.GroupDAO = browser.NewSQLiteGroupDAO(conn)
+	a.browserMgr.ExtensionDAO = browser.NewSQLiteExtensionDAO(conn)
 
 	a.migrateToSQLite()
 
 	a.browserMgr.InitData()
+	if err := a.browserMgr.CleanupExpiredTrash(); err != nil {
+		logger.New("Browser").Error("启动清理回收站失败", logger.F("error", err))
+	}
 	a.autoDetectCores()
 	a.loadProxies()
 	a.reconcileProfileProxyBindings()
@@ -162,7 +181,7 @@ func (a *App) startupInitLaunchServer(log *logger.Logger) {
 		log.Error("LaunchServer 启动失败", logger.F("error", err))
 		return
 	}
-	log.Info("LaunchServer 监听地址",
+	log.Debug("LaunchServer 监听地址",
 		logger.F("url", fmt.Sprintf("http://127.0.0.1:%d", a.launchServer.Port())),
 		logger.F("preferred_port", port),
 	)
@@ -170,43 +189,60 @@ func (a *App) startupInitLaunchServer(log *logger.Logger) {
 
 func (a *App) startupInitAutomation() {
 	a.automationMgr = automation.NewManager(a.appRoot, a.config, func(event string, payload any) {
-		if a.ctx == nil {
-			return
-		}
-		runtime.EventsEmit(a.ctx, event, payload)
+		a.emitRuntimeEvent(event, payload)
 	}, automation.Options{})
 }
 
 func (a *App) startupInitBridgeHooks() {
 	a.xrayMgr.OnBridgeDied = func(key string, err error) {
-		if a.ctx != nil {
-			runtime.EventsEmit(a.ctx, "proxy:bridge:died", map[string]interface{}{
-				"engine": "xray",
-				"key":    key[:8],
-				"error":  err.Error(),
-			})
-		}
+		a.emitRuntimeEvent("proxy:bridge:died", map[string]interface{}{
+			"engine": "xray",
+			"key":    bridgeEventKey(key),
+			"error":  errorMessage(err),
+		})
 	}
 	a.singboxMgr.OnBridgeDied = func(key string, err error) {
-		if a.ctx != nil {
-			runtime.EventsEmit(a.ctx, "proxy:bridge:died", map[string]interface{}{
-				"engine": "singbox",
-				"key":    key[:8],
-				"error":  err.Error(),
-			})
-		}
+		a.emitRuntimeEvent("proxy:bridge:died", map[string]interface{}{
+			"engine": "singbox",
+			"key":    bridgeEventKey(key),
+			"error":  errorMessage(err),
+		})
 	}
 }
 
+func bridgeEventKey(key string) string {
+	if len(key) <= 8 {
+		return key
+	}
+	return key[:8]
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func (a *App) startupInitSpeedScheduler() {
-	a.speedScheduler = browser.NewProxySpeedScheduler(
-		a.browserMgr.ProxyDAO,
-		func(proxyId string) (bool, int64, string) {
-			r := proxy.SpeedTest(proxyId, a.config.Browser.Proxies, a.xrayMgr, a.singboxMgr, nil)
-			return r.Ok, r.LatencyMs, r.Error
-		},
-		5*time.Minute,
-		5,
-	)
+	a.ensureSpeedScheduler()
+}
+
+func (a *App) ensureSpeedScheduler() {
+	if a == nil || a.config == nil || a.browserMgr == nil || a.browserMgr.ProxyDAO == nil {
+		return
+	}
+	if a.speedScheduler == nil {
+		a.speedScheduler = browser.NewProxySpeedScheduler(
+			a.browserMgr.ProxyDAO,
+			func(proxyId string) (bool, int64, string) {
+				connectorType := config.NormalizeBrowserConnectorType(a.config.Browser.DefaultConnectorType)
+				r := a.testProxySpeedWithConnector(proxyId, a.getLatestProxies(), connectorType)
+				return r.Ok, r.LatencyMs, r.Error
+			},
+			browser.DefaultProxySpeedInterval,
+			browser.DefaultProxySpeedConcurrency,
+		)
+	}
 	a.speedScheduler.Start()
 }

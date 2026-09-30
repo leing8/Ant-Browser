@@ -11,9 +11,13 @@ import (
 // ProfileDAO 实例配置持久化接口
 type ProfileDAO interface {
 	List() ([]*Profile, error)
+	ListDeleted() ([]*Profile, error)
 	GetById(profileId string) (*Profile, error)
 	Upsert(profile *Profile) error
 	Delete(profileId string) error
+	SoftDelete(profileId string, deletedAt string) error
+	Restore(profileId string) error
+	ListExpiredDeleted(expiredBefore string) ([]*Profile, error)
 }
 
 // SQLiteProfileDAO 基于 SQLite 的 ProfileDAO 实现
@@ -33,11 +37,41 @@ func (d *SQLiteProfileDAO) List() ([]*Profile, error) {
 		       fingerprint_args, proxy_id, proxy_config,
 		       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
 		       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
+		       COALESCE(memory_limit_mb, 0),
 		       launch_args,
-		       tags, keywords, group_id, created_at, updated_at
-		FROM browser_profiles ORDER BY created_at ASC`)
+		       tags, keywords, group_id, created_at, updated_at,
+		       COALESCE(restore_last_session, ''), COALESCE(deleted_at, '')
+		FROM browser_profiles WHERE COALESCE(deleted_at, '') = '' ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("查询实例列表失败: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*Profile
+	for rows.Next() {
+		p, err := scanProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	return list, rows.Err()
+}
+
+// ListDeleted 查询回收站实例，按删除时间倒序
+func (d *SQLiteProfileDAO) ListDeleted() ([]*Profile, error) {
+	rows, err := d.db.Query(`
+		SELECT profile_id, profile_name, user_data_dir, core_id,
+		       fingerprint_args, proxy_id, proxy_config,
+		       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
+		       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
+		       COALESCE(memory_limit_mb, 0),
+		       launch_args,
+		       tags, keywords, group_id, created_at, updated_at,
+		       COALESCE(restore_last_session, ''), COALESCE(deleted_at, '')
+		FROM browser_profiles WHERE COALESCE(deleted_at, '') != '' ORDER BY deleted_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("查询回收站实例失败: %w", err)
 	}
 	defer rows.Close()
 
@@ -59,8 +93,10 @@ func (d *SQLiteProfileDAO) GetById(profileId string) (*Profile, error) {
 		       fingerprint_args, proxy_id, proxy_config,
 		       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
 		       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
+		       COALESCE(memory_limit_mb, 0),
 		       launch_args,
-		       tags, keywords, group_id, created_at, updated_at
+		       tags, keywords, group_id, created_at, updated_at,
+		       COALESCE(restore_last_session, ''), COALESCE(deleted_at, '')
 		FROM browser_profiles WHERE profile_id = ?`, profileId)
 	p, err := scanProfile(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -88,8 +124,8 @@ func (d *SQLiteProfileDAO) Upsert(profile *Profile) error {
 		INSERT INTO browser_profiles
 		  (profile_id, profile_name, user_data_dir, core_id, fingerprint_args,
 		   proxy_id, proxy_config, proxy_bind_source_id, proxy_bind_source_url, proxy_bind_name, proxy_bind_updated_at,
-		   launch_args, tags, keywords, group_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		   memory_limit_mb, launch_args, tags, keywords, group_id, created_at, updated_at, restore_last_session, deleted_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(profile_id) DO UPDATE SET
 		  profile_name     = excluded.profile_name,
 		  user_data_dir    = excluded.user_data_dir,
@@ -101,21 +137,82 @@ func (d *SQLiteProfileDAO) Upsert(profile *Profile) error {
 		  proxy_bind_source_url = excluded.proxy_bind_source_url,
 		  proxy_bind_name = excluded.proxy_bind_name,
 		  proxy_bind_updated_at = excluded.proxy_bind_updated_at,
+		  memory_limit_mb  = excluded.memory_limit_mb,
 		  launch_args      = excluded.launch_args,
 		  tags             = excluded.tags,
 		  keywords         = excluded.keywords,
 		  group_id         = excluded.group_id,
+		  restore_last_session = excluded.restore_last_session,
+		  deleted_at       = excluded.deleted_at,
 		  updated_at       = excluded.updated_at`,
 		profile.ProfileId, profile.ProfileName, profile.UserDataDir, profile.CoreId,
 		string(fingerprintArgs), profile.ProxyId, profile.ProxyConfig,
 		profile.ProxyBindSourceID, profile.ProxyBindSourceURL, profile.ProxyBindName, profile.ProxyBindUpdatedAt,
-		string(launchArgs), string(tags), string(keywords), profile.GroupId,
-		profile.CreatedAt, profile.UpdatedAt,
+		normalizeMemoryLimitMB(profile.MemoryLimitMB), string(launchArgs), string(tags), string(keywords), profile.GroupId,
+		profile.CreatedAt, profile.UpdatedAt, NormalizeRestoreLastSessionMode(profile.RestoreLastSession), profile.DeletedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("保存实例配置失败: %w", err)
 	}
 	return nil
+}
+
+// SoftDelete 将实例移入回收站
+func (d *SQLiteProfileDAO) SoftDelete(profileId string, deletedAt string) error {
+	result, err := d.db.Exec(`UPDATE browser_profiles SET deleted_at = ?, updated_at = ? WHERE profile_id = ?`, deletedAt, deletedAt, profileId)
+	if err != nil {
+		return fmt.Errorf("移入回收站失败: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return fmt.Errorf("实例不存在: %s", profileId)
+	}
+	return nil
+}
+
+// Restore 从回收站恢复实例
+func (d *SQLiteProfileDAO) Restore(profileId string) error {
+	now := time.Now().Format(time.RFC3339)
+	result, err := d.db.Exec(`UPDATE browser_profiles SET deleted_at = '', updated_at = ? WHERE profile_id = ?`, now, profileId)
+	if err != nil {
+		return fmt.Errorf("恢复实例失败: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return fmt.Errorf("实例不存在: %s", profileId)
+	}
+	return nil
+}
+
+// ListExpiredDeleted 查询超过保留期的回收站实例
+func (d *SQLiteProfileDAO) ListExpiredDeleted(expiredBefore string) ([]*Profile, error) {
+	rows, err := d.db.Query(`
+		SELECT profile_id, profile_name, user_data_dir, core_id,
+		       fingerprint_args, proxy_id, proxy_config,
+		       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
+		       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
+		       COALESCE(memory_limit_mb, 0),
+		       launch_args,
+		       tags, keywords, group_id, created_at, updated_at,
+		       COALESCE(restore_last_session, ''), COALESCE(deleted_at, '')
+		FROM browser_profiles WHERE COALESCE(deleted_at, '') != '' AND deleted_at <= ?`, expiredBefore)
+	if err != nil {
+		return nil, fmt.Errorf("查询过期回收站实例失败: %w", err)
+	}
+	var expired []*Profile
+	for rows.Next() {
+		p, err := scanProfile(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		expired = append(expired, p)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return expired, nil
 }
 
 // Delete 删除实例配置
@@ -151,9 +248,11 @@ func (d *SQLiteProfileDAO) ListByGroup(groupId string, includeChildren bool, chi
 			       fingerprint_args, proxy_id, proxy_config,
 			       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
 			       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
+			       COALESCE(memory_limit_mb, 0),
 			       launch_args,
-			       tags, keywords, group_id, created_at, updated_at
-			FROM browser_profiles WHERE group_id IN (%s) ORDER BY created_at ASC`, inClause), args...)
+			       tags, keywords, group_id, created_at, updated_at,
+			       COALESCE(restore_last_session, ''), COALESCE(deleted_at, '')
+			FROM browser_profiles WHERE COALESCE(deleted_at, '') = '' AND group_id IN (%s) ORDER BY created_at ASC`, inClause), args...)
 	} else {
 		// 仅查询指定分组
 		rows, err = d.db.Query(`
@@ -161,9 +260,11 @@ func (d *SQLiteProfileDAO) ListByGroup(groupId string, includeChildren bool, chi
 			       fingerprint_args, proxy_id, proxy_config,
 			       COALESCE(proxy_bind_source_id, ''), COALESCE(proxy_bind_source_url, ''),
 			       COALESCE(proxy_bind_name, ''), COALESCE(proxy_bind_updated_at, ''),
+			       COALESCE(memory_limit_mb, 0),
 			       launch_args,
-			       tags, keywords, group_id, created_at, updated_at
-			FROM browser_profiles WHERE group_id = ? ORDER BY created_at ASC`, groupId)
+			       tags, keywords, group_id, created_at, updated_at,
+			       COALESCE(restore_last_session, ''), COALESCE(deleted_at, '')
+			FROM browser_profiles WHERE COALESCE(deleted_at, '') = '' AND group_id = ? ORDER BY created_at ASC`, groupId)
 	}
 
 	if err != nil {
@@ -218,8 +319,8 @@ func scanProfile(s scanner) (*Profile, error) {
 		&p.ProfileId, &p.ProfileName, &p.UserDataDir, &p.CoreId,
 		&fingerprintArgsJSON, &p.ProxyId, &p.ProxyConfig,
 		&p.ProxyBindSourceID, &p.ProxyBindSourceURL, &p.ProxyBindName, &p.ProxyBindUpdatedAt,
-		&launchArgsJSON, &tagsJSON, &keywordsJSON, &p.GroupId,
-		&p.CreatedAt, &p.UpdatedAt,
+		&p.MemoryLimitMB, &launchArgsJSON, &tagsJSON, &keywordsJSON, &p.GroupId,
+		&p.CreatedAt, &p.UpdatedAt, &p.RestoreLastSession, &p.DeletedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -240,5 +341,7 @@ func scanProfile(s scanner) (*Profile, error) {
 	if p.Keywords == nil {
 		p.Keywords = []string{}
 	}
+	p.RestoreLastSession = NormalizeRestoreLastSessionMode(p.RestoreLastSession)
+	p.MemoryLimitMB = normalizeMemoryLimitMB(p.MemoryLimitMB)
 	return &p, nil
 }

@@ -5,198 +5,18 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func backupWritePackageZip(zipPath string, scope backup.Scope, manifest backup.Manifest, emitProgress func(phase string, progress int, message string, meta *backupProgressMeta)) (int, int, int, error) {
-	emit := func(phase string, progress int, message string, meta *backupProgressMeta) {
-		if emitProgress != nil {
-			emitProgress(phase, progress, message, meta)
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(zipPath), 0755); err != nil {
-		return 0, 0, 0, fmt.Errorf("创建导出目录失败: %w", err)
-	}
-	emit("writing", 18, "正在创建导出文件...", nil)
-
-	tmpPath := zipPath + ".tmp"
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("创建导出文件失败: %w", err)
-	}
-	w := zip.NewWriter(f)
-
-	includedEntries := 0
-	skippedEntries := 0
-	fileCount := 0
-
-	writeErr := func() error {
-		emit("writing", 20, "正在写入备份清单...", nil)
-		manifestData, err := json.MarshalIndent(manifest, "", "  ")
-		if err != nil {
-			return err
-		}
-		mw, err := w.Create("manifest.json")
-		if err != nil {
-			return err
-		}
-		if _, err := mw.Write(manifestData); err != nil {
-			return err
-		}
-		fileCount++
-
-		totalEntries := len(scope.Entries)
-		if totalEntries == 0 {
-			emit("writing", 90, "没有可导出的目录条目", nil)
-		}
-		for i, entry := range scope.Entries {
-			meta := &backupProgressMeta{
-				ComponentID:   entry.ID,
-				ComponentName: backupResolveEntryComponentName(entry),
-				EntryIndex:    i + 1,
-				EntryTotal:    totalEntries,
-			}
-			startProgress := 20 + int(float64(i)/float64(totalEntries)*70)
-			emit("writing", startProgress, fmt.Sprintf("开始处理组件 %d/%d：%s", i+1, totalEntries, meta.ComponentName), meta)
-
-			info, err := os.Stat(entry.SourcePath)
-			if err != nil {
-				if os.IsNotExist(err) && !entry.Required {
-					skippedEntries++
-					progress := 20 + int(float64(i+1)/float64(totalEntries)*70)
-					emit("writing", progress, fmt.Sprintf("组件跳过：%s（源路径不存在）", meta.ComponentName), meta)
-					continue
-				}
-				return fmt.Errorf("读取导出源失败(%s): %w", entry.ID, err)
-			}
-			entryAddedFiles := 0
-			if info.IsDir() {
-				n, err := backupZipAddDir(w, entry.SourcePath, entry.ArchivePath, zipPath)
-				if err != nil {
-					return fmt.Errorf("写入目录失败(%s): %w", entry.ID, err)
-				}
-				fileCount += n
-				entryAddedFiles = n
-			} else {
-				if backupSamePath(entry.SourcePath, zipPath) {
-					skippedEntries++
-					progress := 20 + int(float64(i+1)/float64(totalEntries)*70)
-					emit("writing", progress, fmt.Sprintf("组件跳过：%s（导出文件本身）", meta.ComponentName), meta)
-					continue
-				}
-				if err := backupZipAddFile(w, entry.SourcePath, strings.TrimSuffix(entry.ArchivePath, "/")); err != nil {
-					return fmt.Errorf("写入文件失败(%s): %w", entry.ID, err)
-				}
-				fileCount++
-				entryAddedFiles = 1
-			}
-			includedEntries++
-			progress := 20 + int(float64(i+1)/float64(totalEntries)*70)
-			emit("writing", progress, fmt.Sprintf("组件完成：%s（新增 %d 个文件）", meta.ComponentName, entryAddedFiles), meta)
-		}
-		return nil
-	}()
-
-	closeErr := w.Close()
-	fileCloseErr := f.Close()
-	if writeErr != nil {
-		emit("error", 100, writeErr.Error(), nil)
-		_ = os.Remove(tmpPath)
-		return 0, 0, 0, writeErr
-	}
-	if closeErr != nil {
-		emit("error", 100, closeErr.Error(), nil)
-		_ = os.Remove(tmpPath)
-		return 0, 0, 0, closeErr
-	}
-	if fileCloseErr != nil {
-		emit("error", 100, fileCloseErr.Error(), nil)
-		_ = os.Remove(tmpPath)
-		return 0, 0, 0, fileCloseErr
-	}
-	if err := os.Rename(tmpPath, zipPath); err != nil {
-		emit("error", 100, err.Error(), nil)
-		_ = os.Remove(tmpPath)
-		return 0, 0, 0, fmt.Errorf("写入导出文件失败: %w", err)
-	}
-	emit("done", 100, "导出完成", nil)
-	return includedEntries, skippedEntries, fileCount, nil
-}
-
-func backupZipAddDir(w *zip.Writer, srcDir, archiveBase, outputZipPath string) (int, error) {
-	base := strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(archiveBase)), "/")
-	if base == "" {
-		return 0, fmt.Errorf("archive base 不能为空")
-	}
-	fileCount := 0
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if backupSamePath(path, outputZipPath) {
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		targetName := base + "/" + rel
-		if d.IsDir() {
-			_, err := w.Create(strings.TrimSuffix(targetName, "/") + "/")
-			return err
-		}
-		if err := backupZipAddFile(w, path, targetName); err != nil {
-			return err
-		}
-		fileCount++
-		return nil
-	})
-	return fileCount, err
-}
-
-func backupZipAddFile(w *zip.Writer, srcFile, archivePath string) error {
-	info, err := os.Stat(srcFile)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return fmt.Errorf("不支持将目录按文件写入: %s", srcFile)
-	}
-	header, err := zip.FileInfoHeader(info)
-	if err != nil {
-		return err
-	}
-	header.Name = strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(archivePath)), "/")
-	header.Method = zip.Deflate
-	if header.Name == "" {
-		return fmt.Errorf("archivePath 不能为空")
-	}
-	writer, err := w.CreateHeader(header)
-	if err != nil {
-		return err
-	}
-	in, err := os.Open(srcFile)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	_, err = io.Copy(writer, in)
-	return err
+	return backupWritePackageZipWithCookies(zipPath, scope, manifest, nil, emitProgress)
 }
 
 // backupWritePackageZipWithCookies 导出 ZIP 包并附带 Cookie JSON 数据。
-// 先调用原始的文件打包逻辑，再将 Cookie 数据写入 ZIP。
 func backupWritePackageZipWithCookies(zipPath string, scope backup.Scope, manifest backup.Manifest, cookieMap map[string][]CookieInfo, emitProgress func(phase string, progress int, message string, meta *backupProgressMeta)) (int, int, int, error) {
 	emit := func(phase string, progress int, message string, meta *backupProgressMeta) {
 		if emitProgress != nil {
@@ -218,9 +38,91 @@ func backupWritePackageZipWithCookies(zipPath string, scope backup.Scope, manife
 	includedEntries := 0
 	skippedEntries := 0
 	fileCount := 0
+	metadataPath := backupMetadataPath(zipPath)
 
 	writeErr := func() error {
-		emit("writing", 20, "正在写入备份清单...", nil)
+		totalEntries := len(scope.Entries)
+		if totalEntries == 0 {
+			emit("writing", 90, "没有可导出的目录条目", nil)
+		}
+		for i, entry := range scope.Entries {
+			meta := &backupProgressMeta{
+				ComponentID:   entry.ID,
+				ComponentName: backupResolveEntryComponentName(entry),
+				EntryIndex:    i + 1,
+				EntryTotal:    totalEntries,
+			}
+			startProgress := 20 + int(float64(i)/float64(totalEntries)*70)
+			emit("writing", startProgress, fmt.Sprintf("开始处理组件 %d/%d：%s", i+1, totalEntries, meta.ComponentName), meta)
+			lastProgressAt := time.Time{}
+			emitEntryProgress := func(bytesWritten int64) {
+				now := time.Now()
+				if !lastProgressAt.IsZero() && now.Sub(lastProgressAt) < 500*time.Millisecond {
+					return
+				}
+				lastProgressAt = now
+				emit("writing", startProgress, fmt.Sprintf("正在处理组件 %d/%d：%s，已读取 %s", i+1, totalEntries, meta.ComponentName, formatBackupFileSize(bytesWritten)), meta)
+			}
+
+			info, err := os.Stat(entry.SourcePath)
+			if err != nil {
+				if os.IsNotExist(err) && !entry.Required {
+					skippedEntries++
+					progress := 20 + int(float64(i+1)/float64(totalEntries)*70)
+					emit("writing", progress, fmt.Sprintf("组件跳过：%s（源路径不存在）", meta.ComponentName), meta)
+					continue
+				}
+				return fmt.Errorf("读取导出源失败(%s): %w", entry.ID, err)
+			}
+			entryAddedFiles := 0
+			entryStats := newBackupArchiveStats()
+			if info.IsDir() {
+				var err error
+				entryStats, err = backupZipAddDir(w, entry.SourcePath, entry.ArchivePath, zipPath, metadataPath, emitEntryProgress)
+				if err != nil {
+					return fmt.Errorf("写入目录失败(%s): %w", entry.ID, err)
+				}
+				fileCount += entryStats.fileCount
+				entryAddedFiles = entryStats.fileCount
+			} else {
+				if backupSamePath(entry.SourcePath, zipPath) || backupSamePath(entry.SourcePath, zipPath+".tmp") || backupSamePath(entry.SourcePath, metadataPath) || backupSamePath(entry.SourcePath, metadataPath+".tmp") {
+					skippedEntries++
+					progress := 20 + int(float64(i+1)/float64(totalEntries)*70)
+					emit("writing", progress, fmt.Sprintf("组件跳过：%s（导出文件本身）", meta.ComponentName), meta)
+					continue
+				}
+				if err := backupZipAddFile(w, entry.SourcePath, strings.TrimSuffix(entry.ArchivePath, "/"), &entryStats, emitEntryProgress); err != nil {
+					return fmt.Errorf("写入文件失败(%s): %w", entry.ID, err)
+				}
+				fileCount++
+				entryAddedFiles = 1
+			}
+			for i := range manifest.Entries {
+				if manifest.Entries[i].ID != entry.ID {
+					continue
+				}
+				manifest.Entries[i].FileCount = entryStats.fileCount
+				manifest.Entries[i].ByteSize = entryStats.byteSize
+				manifest.Entries[i].SHA256 = entryStats.sha256()
+				break
+			}
+			includedEntries++
+			progress := 20 + int(float64(i+1)/float64(totalEntries)*70)
+			emit("writing", progress, fmt.Sprintf("组件完成：%s（新增 %d 个文件）", meta.ComponentName, entryAddedFiles), meta)
+		}
+
+		// 写入 Cookie JSON 文件
+		if len(cookieMap) > 0 {
+			emit("writing", 92, fmt.Sprintf("正在写入 Cookie 数据（%d 个实例）...", len(cookieMap)), nil)
+			cookieFiles, err := backupWriteCookieEntriesToZip(w, cookieMap)
+			if err != nil {
+				return fmt.Errorf("写入 Cookie 数据失败: %w", err)
+			}
+			fileCount += cookieFiles
+			emit("writing", 94, fmt.Sprintf("Cookie 数据写入完成（%d 个文件）", cookieFiles), nil)
+		}
+
+		emit("writing", 94, "正在写入备份清单...", nil)
 		manifestData, err := json.MarshalIndent(manifest, "", "  ")
 		if err != nil {
 			return err
@@ -233,68 +135,6 @@ func backupWritePackageZipWithCookies(zipPath string, scope backup.Scope, manife
 			return err
 		}
 		fileCount++
-
-		totalEntries := len(scope.Entries)
-		if totalEntries == 0 {
-			emit("writing", 90, "没有可导出的目录条目", nil)
-		}
-		for i, entry := range scope.Entries {
-			meta := &backupProgressMeta{
-				ComponentID:   entry.ID,
-				ComponentName: backupResolveEntryComponentName(entry),
-				EntryIndex:    i + 1,
-				EntryTotal:    totalEntries,
-			}
-			startProgress := 20 + int(float64(i)/float64(totalEntries)*60)
-			emit("writing", startProgress, fmt.Sprintf("开始处理组件 %d/%d：%s", i+1, totalEntries, meta.ComponentName), meta)
-
-			info, err := os.Stat(entry.SourcePath)
-			if err != nil {
-				if os.IsNotExist(err) && !entry.Required {
-					skippedEntries++
-					progress := 20 + int(float64(i+1)/float64(totalEntries)*60)
-					emit("writing", progress, fmt.Sprintf("组件跳过：%s（源路径不存在）", meta.ComponentName), meta)
-					continue
-				}
-				return fmt.Errorf("读取导出源失败(%s): %w", entry.ID, err)
-			}
-			entryAddedFiles := 0
-			if info.IsDir() {
-				n, err := backupZipAddDir(w, entry.SourcePath, entry.ArchivePath, zipPath)
-				if err != nil {
-					return fmt.Errorf("写入目录失败(%s): %w", entry.ID, err)
-				}
-				fileCount += n
-				entryAddedFiles = n
-			} else {
-				if backupSamePath(entry.SourcePath, zipPath) {
-					skippedEntries++
-					progress := 20 + int(float64(i+1)/float64(totalEntries)*60)
-					emit("writing", progress, fmt.Sprintf("组件跳过：%s（导出文件本身）", meta.ComponentName), meta)
-					continue
-				}
-				if err := backupZipAddFile(w, entry.SourcePath, strings.TrimSuffix(entry.ArchivePath, "/")); err != nil {
-					return fmt.Errorf("写入文件失败(%s): %w", entry.ID, err)
-				}
-				fileCount++
-				entryAddedFiles = 1
-			}
-			includedEntries++
-			progress := 20 + int(float64(i+1)/float64(totalEntries)*60)
-			emit("writing", progress, fmt.Sprintf("组件完成：%s（新增 %d 个文件）", meta.ComponentName, entryAddedFiles), meta)
-		}
-
-		// 写入 Cookie JSON 文件
-		if len(cookieMap) > 0 {
-			emit("writing", 85, fmt.Sprintf("正在写入 Cookie 数据（%d 个实例）...", len(cookieMap)), nil)
-			cookieFiles, err := backupWriteCookieEntriesToZip(w, cookieMap)
-			if err != nil {
-				return fmt.Errorf("写入 Cookie 数据失败: %w", err)
-			}
-			fileCount += cookieFiles
-			emit("writing", 88, fmt.Sprintf("Cookie 数据写入完成（%d 个文件）", cookieFiles), nil)
-		}
-
 		return nil
 	}()
 
@@ -320,9 +160,84 @@ func backupWritePackageZipWithCookies(zipPath string, scope backup.Scope, manife
 		_ = os.Remove(tmpPath)
 		return 0, 0, 0, fmt.Errorf("写入导出文件失败: %w", err)
 	}
-	emit("done", 100, "导出完成", nil)
+	if _, err := backupWriteMetadata(zipPath, manifest, includedEntries, skippedEntries); err != nil {
+		emit("warning", 100, fmt.Sprintf("备份文件已生成，但元数据文件写入失败：%v", err), nil)
+	}
 	return includedEntries, skippedEntries, fileCount, nil
 }
+
+func backupZipAddDir(w *zip.Writer, srcDir, archiveBase, outputZipPath, outputMetadataPath string, progress func(int64)) (backupArchiveStats, error) {
+	base := strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(archiveBase)), "/")
+	if base == "" {
+		return backupArchiveStats{}, fmt.Errorf("archive base 不能为空")
+	}
+	stats := newBackupArchiveStats()
+	if _, err := w.Create(base + "/"); err != nil {
+		return backupArchiveStats{}, err
+	}
+	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if backupSamePath(path, outputZipPath) || backupSamePath(path, outputZipPath+".tmp") || backupSamePath(path, outputMetadataPath) || backupSamePath(path, outputMetadataPath+".tmp") {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		targetName := base + "/" + rel
+		if d.IsDir() {
+			_, err := w.Create(strings.TrimSuffix(targetName, "/") + "/")
+			return err
+		}
+		if err := backupZipAddFile(w, path, targetName, &stats, progress); err != nil {
+			return err
+		}
+		return nil
+	})
+	return stats, err
+}
+
+func backupZipAddFile(w *zip.Writer, srcFile, archivePath string, stats *backupArchiveStats, progress func(int64)) error {
+	info, err := os.Stat(srcFile)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("不支持将目录按文件写入: %s", srcFile)
+	}
+	header, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return err
+	}
+	header.Name = strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(archivePath)), "/")
+	header.Method = zip.Deflate
+	if header.Name == "" {
+		return fmt.Errorf("archivePath 不能为空")
+	}
+	writer, err := w.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+	if stats == nil {
+		return fmt.Errorf("备份条目统计器不能为空")
+	}
+	return stats.addFileWithProgress(header.Name, srcFile, writer, func(bytesWritten int64) {
+		if progress != nil {
+			progress(stats.byteSize + bytesWritten)
+		}
+	})
+}
+
+
 
 // backupWriteCookieEntriesToZip 将 Cookie JSON 数据写入 ZIP 包。
 // 路径格式：payload/browser/cookies/<profileId>.json

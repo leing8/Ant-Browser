@@ -10,12 +10,16 @@ func normalizeProxyBindValue(v string) string {
 }
 
 func (m *Manager) listProxyCatalog() []Proxy {
+	var list []Proxy
 	if m.ProxyDAO != nil {
-		if list, err := m.ProxyDAO.List(); err == nil && len(list) > 0 {
-			return append([]Proxy{}, list...)
+		if loaded, err := m.ProxyDAO.List(); err == nil && len(loaded) > 0 {
+			list = loaded
 		}
 	}
-	return append([]Proxy{}, m.Config.Browser.Proxies...)
+	if len(list) == 0 {
+		list = append([]Proxy{}, m.Config.Browser.Proxies...)
+	}
+	return ensureBuiltinDirectProxy(list)
 }
 
 func findProxyByID(list []Proxy, proxyID string) (Proxy, bool) {

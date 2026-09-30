@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"ant-chrome/backend/internal/config"
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -20,7 +21,7 @@ type XrayManager struct {
 	Bridges      map[string]*XrayBridge
 	OnBridgeDied func(key string, err error) // 桥接进程意外退出回调
 	mu           sync.Mutex
-	launchMu     sync.Mutex
+	launchLocks  map[string]*bridgeLaunchLock
 	stopCh       chan struct{}
 	stopOnce     sync.Once
 }
@@ -28,10 +29,11 @@ type XrayManager struct {
 // NewXrayManager 创建 Xray 管理器
 func NewXrayManager(cfg *config.Config, appRoot string) *XrayManager {
 	manager := &XrayManager{
-		Config:  cfg,
-		AppRoot: appRoot,
-		Bridges: make(map[string]*XrayBridge),
-		stopCh:  make(chan struct{}),
+		Config:      cfg,
+		AppRoot:     appRoot,
+		Bridges:     make(map[string]*XrayBridge),
+		launchLocks: make(map[string]*bridgeLaunchLock),
+		stopCh:      make(chan struct{}),
 	}
 	go manager.cleanupLoop()
 	return manager
@@ -41,11 +43,13 @@ func NewXrayManager(cfg *config.Config, appRoot string) *XrayManager {
 // 返回: supported bool, errorMsg string
 func ValidateProxyConfig(proxyConfig string, proxies []config.BrowserProxy, proxyId string) (bool, string) {
 	src := strings.TrimSpace(proxyConfig)
+	preferredKernel := ""
 	if proxyId != "" {
 		found := false
 		for _, item := range proxies {
 			if strings.EqualFold(item.ProxyId, proxyId) {
 				src = strings.TrimSpace(item.ProxyConfig)
+				preferredKernel = strings.TrimSpace(item.PreferredKernel)
 				found = true
 				break
 			}
@@ -55,6 +59,11 @@ func ValidateProxyConfig(proxyConfig string, proxies []config.BrowserProxy, prox
 				return false, fmt.Sprintf("代理链路不可用：代理池节点已不存在（proxyId=%s）。可能因订阅刷新后节点下线或被删除，请重新选择代理后再启动。", proxyId)
 			}
 		}
+	}
+	if resolution, err := ResolveProxyKernel(src, proxies, "", preferredKernel); err != nil {
+		return false, fmt.Sprintf("代理配置解析失败: %v", err)
+	} else if len(resolution.SupportedKernels) == 0 {
+		return false, "代理配置无效"
 	}
 	if src == "" {
 		return true, ""
@@ -74,6 +83,12 @@ func ValidateProxyConfig(proxyConfig string, proxies []config.BrowserProxy, prox
 	}
 	if IsSingBoxProtocol(src) {
 		if _, err := BuildSingBoxOutbound(src); err != nil {
+			return false, fmt.Sprintf("代理配置解析失败: %v", err)
+		}
+		return true, ""
+	}
+	if IsMihomoOnlyProtocol(src) {
+		if err := validateMihomoOnlyProtocol(src); err != nil {
 			return false, fmt.Sprintf("代理配置解析失败: %v", err)
 		}
 		return true, ""
@@ -104,6 +119,12 @@ func RequiresBridge(proxyConfig string, proxies []config.BrowserProxy, proxyId s
 	if IsChainSocks5Proxy(src) {
 		return true
 	}
+	if IsSingBoxProtocol(src) {
+		return false
+	}
+	if IsMihomoOnlyProtocol(src) {
+		return false
+	}
 	if strings.HasPrefix(l, "hysteria://") || strings.HasPrefix(l, "hysteria2://") {
 		return false
 	}
@@ -121,13 +142,17 @@ func RequiresBridge(proxyConfig string, proxies []config.BrowserProxy, proxyId s
 
 // EnsureBridge 确保 Xray 桥接进程运行，用于临时请求场景。
 func (m *XrayManager) EnsureBridge(proxyConfig string, proxies []config.BrowserProxy, proxyId string) (string, error) {
-	socksURL, _, err := m.ensureBridge(proxyConfig, proxies, proxyId, false)
+	return m.EnsureBridgeContext(context.Background(), proxyConfig, proxies, proxyId)
+}
+
+func (m *XrayManager) EnsureBridgeContext(ctx context.Context, proxyConfig string, proxies []config.BrowserProxy, proxyId string) (string, error) {
+	socksURL, _, err := m.ensureBridgeContext(ctx, proxyConfig, proxies, proxyId, false)
 	return socksURL, err
 }
 
 // AcquireBridge 获取一个带引用计数的 Xray 桥接，用于浏览器实例等长生命周期场景。
 func (m *XrayManager) AcquireBridge(proxyConfig string, proxies []config.BrowserProxy, proxyId string) (string, string, error) {
-	return m.ensureBridge(proxyConfig, proxies, proxyId, true)
+	return m.ensureBridgeContext(context.Background(), proxyConfig, proxies, proxyId, true)
 }
 
 // ReleaseBridge 释放一个已占用的桥接引用；空闲桥接会由后台回收协程延迟清理。
@@ -150,12 +175,8 @@ func (m *XrayManager) ReleaseBridge(key string) {
 	bridge.LastUsedAt = time.Now()
 }
 
-// StopAll 关闭所有 xray 桥接进程。
-func (m *XrayManager) StopAll() {
-	m.stopOnce.Do(func() {
-		close(m.stopCh)
-	})
-
+// StopBridges closes all xray bridge processes while keeping the manager cleanup loop alive.
+func (m *XrayManager) StopBridges() {
 	m.mu.Lock()
 	bridges := make([]*XrayBridge, 0, len(m.Bridges))
 	for key, bridge := range m.Bridges {
@@ -170,4 +191,12 @@ func (m *XrayManager) StopAll() {
 	for _, bridge := range bridges {
 		m.stopBridgeProcess(bridge)
 	}
+}
+
+// StopAll closes all xray bridge processes and stops the manager cleanup loop.
+func (m *XrayManager) StopAll() {
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+	})
+	m.StopBridges()
 }

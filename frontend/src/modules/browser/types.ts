@@ -1,8 +1,9 @@
-export interface BrowserProfile {
+﻿export interface BrowserProfile {
   profileId: string
   profileName: string
   userDataDir: string
   coreId: string
+  restoreLastSession?: '' | 'enabled' | 'disabled' | string
   fingerprintArgs: string[]
   proxyId: string
   proxyConfig: string
@@ -10,7 +11,9 @@ export interface BrowserProfile {
   proxyBindSourceUrl?: string
   proxyBindName?: string
   proxyBindUpdatedAt?: string
+  memoryLimitMb: number
   launchArgs: string[]
+  lastLaunchArgs?: string[]
   tags: string[]
   keywords: string[]
   groupId?: string
@@ -22,22 +25,198 @@ export interface BrowserProfile {
   lastError: string
   createdAt: string
   updatedAt: string
+  deletedAt?: string
   lastStartAt?: string
   lastStopAt?: string
   launchCode?: string
+  windowMarkerCode?: string
 }
 
 export interface BrowserProfileInput {
   profileName: string
   userDataDir: string
   coreId: string
+  restoreLastSession?: '' | 'enabled' | 'disabled' | string
   fingerprintArgs: string[]
   proxyId: string
   proxyConfig: string
+  memoryLimitMb: number
   launchArgs: string[]
   tags: string[]
   keywords: string[]
   groupId?: string
+}
+
+export interface BrowserFingerprintRuntimeInfo {
+  language: string
+  languages: string[]
+  timezone: string
+  hardwareConcurrency: number
+  deviceMemory: number
+  maxTouchPoints: number
+  doNotTrack: string
+  mediaDeviceCount: number
+  platform: string
+  userAgent: string
+  userAgentData: string
+  webdriver: boolean
+  screenWidth: number
+  screenHeight: number
+  colorDepth: number
+  innerWidth: number
+  innerHeight: number
+  outerWidth: number
+  outerHeight: number
+  devicePixelRatio: number
+  webglVendor: string
+  webglRenderer: string
+  canvasHash: string
+  audioHash: string
+  clientRectsHash: string
+  plugins: string[]
+}
+
+export interface BrowserFingerprintExpectedInfo {
+  language: string
+  acceptLanguage: string
+  timezone: string
+  hardwareConcurrency: string
+  deviceMemory: string
+  colorDepth: string
+  touchPoints: string
+  windowSize: string
+  brand: string
+  brandVersion: string
+  platform: string
+  platformVersion: string
+  seed: string
+  disableSpoofing: string
+  webrtcPolicy: string
+  doNotTrack: string
+  mediaDevices: string
+  canvasNoise: string
+  audioNoise: string
+  clientRectsNoise: string
+  fontList: string
+  webglVendor: string
+  webglRenderer: string
+}
+
+export interface BrowserFingerprintCheckResult {
+  profileId: string
+  runtime: BrowserFingerprintRuntimeInfo
+  expected: BrowserFingerprintExpectedInfo
+}
+
+export interface BrowserFingerprintCapabilityRow {
+  capability: string
+  status: string
+  inputArg: string
+  runtimeArg: string
+  action: string
+  note: string
+}
+
+export interface BrowserFingerprintCapabilityReport {
+  profileId: string
+  coreId: string
+  coreName: string
+  chromeVersion: string
+  chromeMajor: number
+  versionStatus: string
+  rawArgs: string[]
+  launchArgs: string[]
+  rows: BrowserFingerprintCapabilityRow[]
+  warnings: string[]
+}
+
+export interface BrowserProfilePackageExportResult {
+  cancelled: boolean
+  zipPath: string
+  profileCount: number
+  fileCount: number
+  message: string
+}
+
+export interface BrowserProfilePackageImportResult {
+  cancelled: boolean
+  importedCount: number
+  createdCount?: number
+  overwrittenCount?: number
+  renamedCount?: number
+  profileMappings: Record<string, string>
+  warnings?: string[]
+  message: string
+}
+
+export type BrowserProfilePackageImportActionMode = 'new' | 'overwrite' | 'rename'
+
+export interface BrowserProfilePackageImportAction {
+  sourceProfileId: string
+  sourceIndex: number
+  mode: BrowserProfilePackageImportActionMode
+  profileName?: string
+}
+
+export interface BrowserProfilePackageImportConflict {
+  sourceProfileId: string
+  sourceProfileName: string
+  targetProfileId: string
+  targetProfileName: string
+  matchType: 'profileId' | 'profileName' | string
+  targetRunning: boolean
+  targetDeleted: boolean
+  ambiguous: boolean
+  targetMatches: number
+  sourceTargetCollision: boolean
+  sourceNameCollision: boolean
+}
+
+export interface BrowserProfilePackageImportPreviewProfile {
+  sourceIndex: number
+  sourceProfileId: string
+  sourceProfileName: string
+  targetProfileId: string
+  targetProfileName: string
+  matchType: 'profileId' | 'profileName' | string
+  targetRunning: boolean
+  targetDeleted: boolean
+  ambiguous: boolean
+  targetMatches: number
+  sourceTargetCollision: boolean
+  sourceNameCollision: boolean
+  suggestedAction: BrowserProfilePackageImportActionMode
+  suggestedProfileName: string
+  canOverwrite: boolean
+}
+
+export interface BrowserProfilePackageImportPreview {
+  cancelled: boolean
+  zipPath: string
+  profileCount: number
+  conflictCount: number
+  canOverwrite: boolean
+  profiles: BrowserProfilePackageImportPreviewProfile[]
+  conflicts: BrowserProfilePackageImportConflict[]
+  message: string
+}
+
+export type BrowserProfileCopyMode = 'auto_fingerprint' | 'regular'
+
+export type BrowserProfileAutomationTarget =
+  | 'seed'
+  | 'identity'
+  | 'locale'
+  | 'screen'
+  | 'hardware'
+  | 'render'
+  | 'fonts'
+  | 'network'
+  | 'devices'
+
+export interface BrowserProfileCopyOptions {
+  mode: BrowserProfileCopyMode
+  automationTargets: BrowserProfileAutomationTarget[]
 }
 
 export interface BrowserTab {
@@ -52,9 +231,12 @@ export interface BrowserSettings {
   defaultFingerprintArgs: string[]
   defaultLaunchArgs: string[]
   defaultStartUrls: string[]
+  lightStartEnabled: boolean
   restoreLastSession: boolean
   startReadyTimeoutMs: number
   startStableWindowMs: number
+  // xray 表示 Xray + sing-box 组合连接栈；mihomo 表示独立 Mihomo 连接栈。
+  defaultConnectorType: 'xray' | 'mihomo' | string
 }
 
 export interface ProxyCheckTarget {
@@ -97,6 +279,7 @@ export interface BrowserProxy {
   proxyId: string
   proxyName: string
   proxyConfig: string
+  preferredKernel?: 'auto' | 'xray' | 'sing-box' | 'mihomo' | string
   dnsServers?: string
   groupName?: string
   sourceId?: string
@@ -128,10 +311,122 @@ export interface ProxyIPHealthResult {
   updatedAt: string
 }
 
+
+export interface ProxyCoreDownloadProgress {
+  core: string
+  goos: string
+  goarch: string
+  phase: string
+  progress: number
+  message: string
+}
+
+export interface ProxyCoreStatusResult {
+  core: string
+  goos: string
+  goarch: string
+  installed: boolean
+  configured: boolean
+  active: boolean
+  binaryPath: string
+  source: string
+  message: string
+}
+
+export interface ProxyCoreDownloadInfoResult {
+  core: string
+  goos: string
+  goarch: string
+  version: string
+  repo: string
+  releaseUrl: string
+  downloadUrl: string
+  assetName: string
+  installDir: string
+  binaryName: string
+  message: string
+}
+
+export interface ProxyBridgeWarmupResult {
+  proxyId: string
+  ok: boolean
+  engine: string
+  socksUrl: string
+  latencyMs: number
+  error: string
+}
+
+export interface ProxySpeedTestResult {
+  proxyId: string
+  ok: boolean
+  latencyMs: number
+  engine?: string
+  error: string
+}
+
+
+export interface ProxyLocationOption {
+  label: string
+  timezone: string
+  lang: string
+}
+
+export interface ProxyLocationResolveResult {
+  proxyId: string
+  ok: boolean
+  auto: boolean
+  source: string
+  error: string
+  ip: string
+  country: string
+  region: string
+  city: string
+  timezone: string
+  lang: string
+  health?: ProxyIPHealthResult
+  alternates?: ProxyLocationOption[]
+  resolvedAt: string
+}
+
 export interface BrowserCoreExtended {
   coreId: string
   chromeVersion: string
   instanceCount: number
+}
+
+export interface BrowserExtension {
+  extensionId: string
+  name: string
+  version: string
+  description: string
+  iconDataUrl: string
+  manifestJson: string
+  sourceUrl: string
+  installDir: string
+  installMode: string
+  packagePath: string
+  packageHash: string
+  enabled: boolean
+  defaultInstall: boolean
+  installedAt: string
+  updatedAt: string
+}
+
+export interface BrowserExtensionLookupResult {
+  extensionId: string
+  name: string
+  version: string
+  description: string
+  storeUrl: string
+  installable: boolean
+  message: string
+}
+
+export interface BrowserProfileExtensionSettings {
+  profileId: string
+  configured: boolean
+  extensionIds: string[]
+  updatedAt: string
 }
 
 export interface CookieInfo {
@@ -188,3 +483,4 @@ export interface BrowserGroupInput {
 export interface BrowserGroupWithCount extends BrowserGroup {
   instanceCount: number
 }
+

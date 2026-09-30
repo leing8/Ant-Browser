@@ -22,30 +22,44 @@ const (
 
 // App 应用结构体
 type App struct {
-	ctx            context.Context
-	config         *config.Config
-	db             *database.DB
-	interceptor    *logger.MethodInterceptor
-	browserMgr     *browser.Manager
-	xrayMgr        *proxy.XrayManager
-	clashMgr       *proxy.ClashManager
-	singboxMgr     *proxy.SingBoxManager
-	launchCodeSvc  *launchcode.LaunchCodeService
-	launchServer   *launchcode.LaunchServer
-	automationMgr  *automation.Manager
-	speedScheduler *browser.ProxySpeedScheduler
-	appRoot        string
-	version        string
+	ctx             context.Context
+	config          *config.Config
+	db              *database.DB
+	interceptor     *logger.MethodInterceptor
+	browserMgr      *browser.Manager
+	xrayMgr         *proxy.XrayManager
+	clashMgr        *proxy.ClashManager
+	singboxMgr      *proxy.SingBoxManager
+	launchCodeSvc   *launchcode.LaunchCodeService
+	launchServer    *launchcode.LaunchServer
+	automationMgr   *automation.Manager
+	speedScheduler  *browser.ProxySpeedScheduler
+	backupScheduler *backupScheduler
+	appRoot         string
+	version         string
 
-	forceQuit              bool
-	quitMode               quitMode
-	maintenanceMu          sync.Mutex
-	bridgeMu               sync.Mutex
-	xrayBridgeRefs         map[string]string
-	automationTargetMu     sync.Mutex
-	automationTargetCursor map[string]string
-	stopServicesOnce       sync.Once
-	finalizeOnce           sync.Once
+	forceQuit                     bool
+	quitMode                      quitMode
+	quitMu                        sync.RWMutex
+	runtimeMu                     sync.RWMutex
+	runtimeStopped                bool
+	backgroundTaskCtx             context.Context
+	backgroundTaskCancel          context.CancelFunc
+	backgroundTasks               sync.WaitGroup
+	backgroundTasksBlocked        bool
+	maintenanceMu                 sync.Mutex
+	bridgeMu                      sync.Mutex
+	profileBridgeRefs             map[string]profileProxyBridgeRef
+	deferredStartTargetsMu        sync.Mutex
+	deferredStartTargets          map[string]deferredStartTargetsPlan
+	automationTargetMu            sync.Mutex
+	automationTargetCursor        map[string]string
+	profileWindowMarkersMu        sync.Mutex
+	profileWindowMarkers          map[string]*profileWindowMarker
+	browserProcessMonitors        map[string]*browserProcessMonitor
+	backupLocalConfigPathOverride string
+	stopServicesOnce              sync.Once
+	finalizeOnce                  sync.Once
 }
 
 // NewApp 创建新的应用实例
@@ -57,8 +71,11 @@ func NewApp(appRoot string, appVersion ...string) *App {
 	return &App{
 		appRoot:                strings.TrimSpace(appRoot),
 		version:                version,
-		xrayBridgeRefs:         make(map[string]string),
+		profileBridgeRefs:      make(map[string]profileProxyBridgeRef),
+		deferredStartTargets:   make(map[string]deferredStartTargetsPlan),
 		automationTargetCursor: make(map[string]string),
+		profileWindowMarkers:   make(map[string]*profileWindowMarker),
+		browserProcessMonitors: make(map[string]*browserProcessMonitor),
 	}
 }
 
