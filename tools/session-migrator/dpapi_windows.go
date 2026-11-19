@@ -1,5 +1,7 @@
 //go:build windows
 
+// dpapi_windows.go 通过原生 Windows crypt32.dll / kernel32.dll 系统调用实现 DPAPI 加解密，
+// 负责读写 Chromium Local State 中的 os_crypt.encrypted_key（免 CGO、免外部 DLL 依赖）及控制控制台密码隐藏。
 package main
 
 import (
@@ -18,25 +20,29 @@ import (
 )
 
 const (
+	// cryptProtectUIForbidden 禁止 DPAPI 弹出任何 Windows UI 交互窗口，确保离线批处理不阻塞。
 	cryptProtectUIForbidden = 0x1
-	dpapiPrefix             = "DPAPI"
+	// dpapiPrefix 是 Chromium Windows 在 Base64 解码后的 encrypted_key 头部写入的固定 5 字节标识。
+	dpapiPrefix = "DPAPI"
 )
 
 var (
-	modCrypt32              = syscall.NewLazyDLL("crypt32.dll")
-	procCryptProtectData    = modCrypt32.NewProc("CryptProtectData")
-	procCryptUnprotectData  = modCrypt32.NewProc("CryptUnprotectData")
-	modKernel32             = syscall.NewLazyDLL("kernel32.dll")
-	procLocalFree           = modKernel32.NewProc("LocalFree")
-	procGetConsoleMode      = modKernel32.NewProc("GetConsoleMode")
-	procSetConsoleMode      = modKernel32.NewProc("SetConsoleMode")
+	modCrypt32             = syscall.NewLazyDLL("crypt32.dll")
+	procCryptProtectData   = modCrypt32.NewProc("CryptProtectData")
+	procCryptUnprotectData = modCrypt32.NewProc("CryptUnprotectData")
+	modKernel32            = syscall.NewLazyDLL("kernel32.dll")
+	procLocalFree          = modKernel32.NewProc("LocalFree")
+	procGetConsoleMode     = modKernel32.NewProc("GetConsoleMode")
+	procSetConsoleMode     = modKernel32.NewProc("SetConsoleMode")
 )
 
+// dataBlob 对应 Win32 CRYPTOAPI_BLOB (DATA_BLOB) 结构体布局。
 type dataBlob struct {
 	cbData uint32
 	pbData *byte
 }
 
+// dpapiUnprotect 调用 Windows CryptUnprotectData 使用当前登录用户的 DPAPI 主密钥解包密文。
 func dpapiUnprotect(ciphertext []byte) ([]byte, error) {
 	if len(ciphertext) == 0 {
 		return nil, errors.New("DPAPI 密文为空")
@@ -68,6 +74,7 @@ func dpapiUnprotect(ciphertext []byte) ([]byte, error) {
 	return out, nil
 }
 
+// dpapiProtect 调用 Windows CryptProtectData 使用当前登录用户的 DPAPI 主密钥保护明文。
 func dpapiProtect(plaintext []byte) ([]byte, error) {
 	if len(plaintext) == 0 {
 		return nil, errors.New("DPAPI 明文为空")
@@ -99,12 +106,7 @@ func dpapiProtect(plaintext []byte) ([]byte, error) {
 	return out, nil
 }
 
-func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
-}
-
+// localStateKeyInfo 封装从 Chromium Local State 中提取的 Windows DPAPI 密钥与诊断标志。
 type localStateKeyInfo struct {
 	AESKey            []byte
 	HasAppBoundKey    bool

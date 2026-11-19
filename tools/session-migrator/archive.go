@@ -1,3 +1,6 @@
+// archive.go 实现 .antsess 迁移包的封装、读取与可选加密（scrypt + AES-256-GCM）。
+// 外层为标准 ZIP，包含明文摘要 manifest.json 与内层载荷（加密模式为 payload.enc + payload.enc.json，
+// 明文自用模式为 payload.zip）；所有敏感 Cookie、存储、指纹与代理凭据均只保存在内层载荷中。
 package main
 
 import (
@@ -26,6 +29,7 @@ const (
 	minPasswordRunes      = 4
 )
 
+// encryptedPayloadMeta 记录加密载荷的 KDF 算法、随机盐与 AES-GCM Nonce。
 type encryptedPayloadMeta struct {
 	Format string `json:"format"`
 	KDF    string `json:"kdf"`
@@ -33,6 +37,7 @@ type encryptedPayloadMeta struct {
 	Nonce  string `json:"nonce"`
 }
 
+// deriveArchiveKey 使用 scrypt (N=32768, r=8, p=1) 从用户密码与 32 字节随机盐派生 AES-256 密钥。
 func deriveArchiveKey(password string, salt []byte) ([]byte, error) {
 	if len([]rune(password)) < minPasswordRunes {
 		return nil, fmt.Errorf("密码至少需要 %d 个字符（若不想加密请显式选择不设密码）", minPasswordRunes)
@@ -268,6 +273,7 @@ func openSessionArchivePayload(archivePath string, password string) (*ArchiveMan
 	return &manifest, innerReader, nil
 }
 
+// readZipEntryBytes 从 ZIP 条目列表中按规范化的正斜杠路径读取完整字节内容。
 func readZipEntryBytes(files []*zip.File, targetName string) ([]byte, error) {
 	for _, f := range files {
 		if filepath.ToSlash(strings.TrimSpace(f.Name)) != targetName {

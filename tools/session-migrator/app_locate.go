@@ -1,3 +1,5 @@
+// app_locate.go 负责定位 Ant Browser 的开发版/正式版目录、解析最小配置（config.yaml），
+// 以只读快照方式查询 data/app.db 中的实例列表，以及按需创建最小空壳实例条目。
 package main
 
 import (
@@ -17,6 +19,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// minimalAppConfig 仅映射 Ant Browser config.yaml 中定位数据库、实例目录与兜底代理所需的最小字段，
+// 避免与主项目配置结构耦合。
 type minimalAppConfig struct {
 	Database struct {
 		SQLite struct {
@@ -36,21 +40,33 @@ type minimalAppConfig struct {
 	} `yaml:"browser"`
 }
 
+// resolveAppInstallation 解析用户传入或自动发现的目录，兼容 ~ 展开、macOS .app 重定向及误传 data 子目录的容错。
 func resolveAppInstallation(appRoot string) (*AppInstallation, error) {
 	trimmed := strings.TrimSpace(appRoot)
 	if trimmed == "" {
 		return nil, fmt.Errorf("应用根目录不能为空")
 	}
+	if strings.HasPrefix(trimmed, "~/") || trimmed == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if trimmed == "~" {
+				trimmed = home
+			} else {
+				trimmed = filepath.Join(home, trimmed[2:])
+			}
+		}
+	}
 	absRoot, err := filepath.Abs(trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("解析目录路径失败: %w", err)
 	}
+	absRoot = normalizePlatformAppRoot(absRoot)
 	// 容错：若用户不小心传了 <appRoot>/data 目录，则自动回到上一级
 	if strings.EqualFold(filepath.Base(absRoot), "data") {
 		parent := filepath.Dir(absRoot)
 		if fileExists(filepath.Join(absRoot, "app.db")) &&
 			(fileExists(filepath.Join(parent, "config.yaml")) ||
 				fileExists(filepath.Join(parent, "ant-chrome.exe")) ||
+				fileExists(filepath.Join(parent, "ant-chrome")) ||
 				fileExists(filepath.Join(parent, "wails.json"))) {
 			absRoot = parent
 		}
@@ -98,6 +114,7 @@ func resolveAppInstallation(appRoot string) (*AppInstallation, error) {
 	return inst, nil
 }
 
+// detectAppMode 判断目录是源码开发模式（dev.bat / wails.json）还是正式发布版。
 func detectAppMode(appRoot string) string {
 	if fileExists(filepath.Join(appRoot, "wails.json")) || fileExists(filepath.Join(appRoot, "bat", "dev.bat")) {
 		return "dev"
@@ -105,6 +122,7 @@ func detectAppMode(appRoot string) string {
 	return "release"
 }
 
+// discoverAppInstallations 扫描当前工作目录、工具周边目录及平台标准安装位置，返回去重后的 Ant Browser 候选列表。
 func discoverAppInstallations() []AppInstallation {
 	type candidate struct {
 		path  string
@@ -162,14 +180,21 @@ func discoverAppInstallations() []AppInstallation {
 	return results
 }
 
+// looksLikeAntBrowserRoot 通过特征文件快速判定一个目录是否为 Ant Browser 运行根目录或用户状态目录。
 func looksLikeAntBrowserRoot(dir string) bool {
-	if fileExists(filepath.Join(dir, "ant-chrome.exe")) {
+	if fileExists(filepath.Join(dir, "ant-chrome.exe")) || fileExists(filepath.Join(dir, "ant-chrome")) {
+		return true
+	}
+	if fileExists(filepath.Join(dir, "Contents", "MacOS", "ant-chrome")) {
 		return true
 	}
 	if fileExists(filepath.Join(dir, "wails.json")) && fileExists(filepath.Join(dir, "bat", "dev.bat")) {
 		return true
 	}
-	if fileExists(filepath.Join(dir, "data", "app.db")) && fileExists(filepath.Join(dir, "config.yaml")) {
+	if fileExists(filepath.Join(dir, "data", "app.db")) {
+		return true
+	}
+	if fileExists(filepath.Join(dir, "config.yaml")) && dirExists(filepath.Join(dir, "data")) {
 		return true
 	}
 	return false
@@ -271,6 +296,7 @@ func loadProfilesFromDB(inst *AppInstallation, includeDeleted bool) ([]AppProfil
 	return profiles, rows.Err()
 }
 
+// countProfilesInDB 以只读快照方式统计 app.db 中的活跃实例与回收站实例数量（供交互菜单展示）。
 func countProfilesInDB(dbPath string) (active int, deleted int, err error) {
 	snapshotPath, cleanup, err := snapshotSQLiteToTemp(dbPath)
 	if err != nil {
@@ -384,6 +410,7 @@ func createMinimalShellProfilesInDB(inst *AppInstallation, toCreate []AppProfile
 	return nil
 }
 
+// columnDetail 记录 SQLite 表单个列的元信息，用于跨版本动态拼装 INSERT 语句。
 type columnDetail struct {
 	name       string
 	colType    string
@@ -391,6 +418,7 @@ type columnDetail struct {
 	hasDefault bool
 }
 
+// tableColumnDetails 通过 PRAGMA table_info 读取表结构详情，兼容不同历史/未来版本的 app.db。
 func tableColumnDetails(db *sql.DB, tableName string) ([]columnDetail, error) {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
 	if err != nil {
@@ -418,6 +446,7 @@ func tableColumnDetails(db *sql.DB, tableName string) ([]columnDetail, error) {
 	return result, rows.Err()
 }
 
+// tableColumns 返回指定表所有小写列名集合，便于读取前动态检测可选列是否存在。
 func tableColumns(db *sql.DB, tableName string) (map[string]bool, error) {
 	details, err := tableColumnDetails(db, tableName)
 	if err != nil {
@@ -430,6 +459,7 @@ func tableColumns(db *sql.DB, tableName string) (map[string]bool, error) {
 	return out, nil
 }
 
+// resolveProfileDataDir 解析实例对应的 Chromium --user-data-dir 绝对路径（默认以 profile_id 为子目录名）。
 func resolveProfileDataDir(inst *AppInstallation, profileID, userDataDir string) string {
 	dir := strings.TrimSpace(userDataDir)
 	if dir == "" {
@@ -441,6 +471,7 @@ func resolveProfileDataDir(inst *AppInstallation, profileID, userDataDir string)
 	return filepath.Join(inst.UserDataRoot, dir)
 }
 
+// resolveRelative 将相对路径基于 root 解析为绝对路径，若 p 已是绝对路径则直接清理返回。
 func resolveRelative(root, p string) string {
 	cleaned := strings.TrimSpace(p)
 	if cleaned == "" {
@@ -452,6 +483,8 @@ func resolveRelative(root, p string) string {
 	return filepath.Join(root, filepath.FromSlash(cleaned))
 }
 
+// computeFingerprintHash 对排序后的指纹参数计算 8 字节短 SHA-256 摘要，
+// 仅用于导入预览阶段非敏感地提示源/目标指纹是否存在差异。
 func computeFingerprintHash(args []string) string {
 	if len(args) == 0 {
 		return ""
@@ -470,6 +503,7 @@ func computeFingerprintHash(args []string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// newRandomUUIDv4 使用加密安全随机源生成标准 RFC 4122 UUID v4 字符串（零第三方 UUID 依赖）。
 func newRandomUUIDv4() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
@@ -479,11 +513,13 @@ func newRandomUUIDv4() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// fileExists 判断指定路径是否存在且为常规文件。
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
 
+// dirExists 判断指定路径是否存在且为目录。
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()

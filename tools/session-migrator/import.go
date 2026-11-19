@@ -1,3 +1,5 @@
+// import.go 编排离线导入主流程：解包校验 -> 匹配目标实例（ID 优先、名称兜底）->
+// 主程序与实例占用安全检查 -> 自动备份 -> 按需建空壳/同步指纹与代理 -> 按本机密钥重加密写入 Cookies 与 Web Storage。
 package main
 
 import (
@@ -9,32 +11,37 @@ import (
 	"time"
 )
 
+// ImportOptions 定义一次离线导入或 Dry-Run 预览任务的全部参数。
 type ImportOptions struct {
-	AppRoot         string
-	InputPath       string
-	Password        string
-	ProfileFilters  []string
-	MatchBy         string // "id-or-name" (default) | "id" | "name"
-	CreateMissing   bool
-	SyncFingerprint bool
-	SyncProxy       bool
-	CookieMode      string // "replace" (default) | "merge"
-	NoBackup        bool
-	DryRun          bool
-	Force           bool
+	AppRoot          string
+	InputPath        string
+	Password         string
+	ProfileFilters   []string
+	MatchBy          string // "id-or-name" (default) | "id" | "name"
+	CreateMissing    bool
+	SyncFingerprint  bool
+	SyncProxy        bool
+	CookieMode       string // "replace" (default) | "merge"
+	NoBackup         bool
+	DryRun           bool
+	Force            bool
+	KeychainService  string
+	KeychainPassword string
 }
 
+// ImportPlanItem 表示单个源实例在目标电脑上的匹配结果与预计执行动作。
 type ImportPlanItem struct {
-	Source                ArchiveProfileMetadata
-	Action                string // "match-id" | "match-name" | "create" | "skip-unmatched" | "skip-ambiguous"
-	TargetProfile         *AppProfile
-	NewShellProfile       *AppProfile
-	WillSyncFingerprint   bool
-	WillSyncProxy         bool
-	FingerprintDiff       bool
-	Detail                string
+	Source              ArchiveProfileMetadata
+	Action              string // "match-id" | "match-name" | "create" | "skip-unmatched" | "skip-ambiguous"
+	TargetProfile       *AppProfile
+	NewShellProfile     *AppProfile
+	WillSyncFingerprint bool
+	WillSyncProxy       bool
+	FingerprintDiff     bool
+	Detail              string
 }
 
+// ImportSummary 汇总一次导入或预览的执行结果、回滚备份路径与告警列表。
 type ImportSummary struct {
 	TargetRoot             string
 	TargetMode             string
@@ -56,6 +63,7 @@ type ImportSummary struct {
 	Warnings               []string
 }
 
+// normalizeMatchBy 校验并规范化实例匹配策略（id-or-name / id / name）。
 func normalizeMatchBy(v string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "id-or-name", "auto":
@@ -69,6 +77,7 @@ func normalizeMatchBy(v string) (string, error) {
 	}
 }
 
+// normalizeCookieMode 校验并规范化 Cookie 写入模式（replace 覆盖 / merge 合并）。
 func normalizeCookieMode(v string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "replace":
@@ -80,6 +89,7 @@ func normalizeCookieMode(v string) (string, error) {
 	}
 }
 
+// manifestHasFingerprintData 判断迁移包是否包含核心指纹数据（兼容 v1.0.0 旧包）。
 func manifestHasFingerprintData(m *ArchiveManifest) bool {
 	if m == nil {
 		return false
@@ -95,6 +105,7 @@ func manifestHasFingerprintData(m *ArchiveManifest) bool {
 	return false
 }
 
+// manifestHasProxyData 判断迁移包是否包含实例代理 IP 绑定数据。
 func manifestHasProxyData(m *ArchiveManifest) bool {
 	if m == nil {
 		return false
@@ -110,6 +121,7 @@ func manifestHasProxyData(m *ArchiveManifest) bool {
 	return false
 }
 
+// planImport 以纯只读方式计算每个源实例的匹配目标、冲突跳过或新建空壳计划，不产生任何磁盘写入。
 func planImport(inst *AppInstallation, manifest *ArchiveManifest, opts ImportOptions) ([]ImportPlanItem, []AppProfile, error) {
 	allExisting, err := loadProfilesFromDB(inst, true)
 	if err != nil {
@@ -260,6 +272,7 @@ func planImport(inst *AppInstallation, manifest *ArchiveManifest, opts ImportOpt
 	return items, toCreate, nil
 }
 
+// runImport 执行完整离线导入流程（或 --dry-run 预览），确保写入前完成进程锁检测与回滚备份。
 func runImport(opts ImportOptions) (*ImportSummary, error) {
 	matchBy, err := normalizeMatchBy(opts.MatchBy)
 	if err != nil {
@@ -471,6 +484,7 @@ func runImport(opts ImportOptions) (*ImportSummary, error) {
 
 	step := 0
 	totalWork := summary.MatchedCount + summary.CreatedCount
+	cryptoNoticeRecorded := make(map[string]bool)
 	for _, item := range planItems {
 		targetDir := planItemTargetDir(item)
 		targetID := planItemTargetID(item)
@@ -487,16 +501,23 @@ func runImport(opts ImportOptions) (*ImportSummary, error) {
 			backupCreated = true
 		}
 
-		// 1. 恢复并按目标机 DPAPI 重新加密 Cookies
+		// 1. 恢复并按目标机原生加密方案重新加密 Cookies（Windows DPAPI / macOS Keychain）
 		if cf, ok := cookieEntries[item.Source.ProfileID]; ok {
 			var dump ProfileCookieDump
 			if decErr := decodeZipEntryJSON(cf, &dump); decErr != nil {
 				return nil, fmt.Errorf("解析归档 Cookie 失败（%s）: %w", item.Source.ProfileName, decErr)
 			}
 
-			written, _, impErr := importProfileCookies(targetDir, dump, opts.CookieMode, profileBackupDir)
+			written, _, cryptoNotice, impErr := importProfileCookiesWithOptions(targetDir, inst, cookieCryptoOptions{
+				KeychainService:  opts.KeychainService,
+				KeychainPassword: opts.KeychainPassword,
+			}, dump, opts.CookieMode, profileBackupDir)
 			if impErr != nil {
 				return nil, fmt.Errorf("写入目标实例「%s」Cookie 失败: %w", targetName, impErr)
+			}
+			if cryptoNotice != "" && !cryptoNoticeRecorded[cryptoNotice] {
+				cryptoNoticeRecorded[cryptoNotice] = true
+				summary.Warnings = append(summary.Warnings, cryptoNotice)
 			}
 			summary.TotalCookiesWritten += written
 		}
@@ -523,6 +544,7 @@ func runImport(opts ImportOptions) (*ImportSummary, error) {
 	return summary, nil
 }
 
+// decodeZipEntryJSON 打开 ZIP 内单个 JSON 条目并反序列化到目标结构体。
 func decodeZipEntryJSON(f *zip.File, dst any) error {
 	rc, err := f.Open()
 	if err != nil {
@@ -532,6 +554,7 @@ func decodeZipEntryJSON(f *zip.File, dst any) error {
 	return json.NewDecoder(rc).Decode(dst)
 }
 
+// filterArchiveProfiles 按 --profile 参数筛选归档清单中的指定实例，并返回未匹配项。
 func filterArchiveProfiles(profiles []ArchiveProfileMetadata, filters []string) (matched []ArchiveProfileMetadata, missing []string) {
 	if len(filters) == 0 {
 		return profiles, nil
@@ -559,6 +582,7 @@ func filterArchiveProfiles(profiles []ArchiveProfileMetadata, filters []string) 
 	return matched, missing
 }
 
+// planItemTargetDir 返回导入计划项最终写入的目标 user_data_dir 绝对路径。
 func planItemTargetDir(item ImportPlanItem) string {
 	if item.TargetProfile != nil {
 		return item.TargetProfile.ResolvedDataDir
@@ -569,6 +593,7 @@ func planItemTargetDir(item ImportPlanItem) string {
 	return ""
 }
 
+// planItemTargetID 返回导入计划项对应的目标实例 profile_id。
 func planItemTargetID(item ImportPlanItem) string {
 	if item.TargetProfile != nil {
 		return item.TargetProfile.ProfileID
@@ -579,6 +604,7 @@ func planItemTargetID(item ImportPlanItem) string {
 	return ""
 }
 
+// planItemTargetName 返回导入计划项对应的目标实例展示名称。
 func planItemTargetName(item ImportPlanItem) string {
 	if item.TargetProfile != nil {
 		return item.TargetProfile.ProfileName

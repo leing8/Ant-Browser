@@ -1,3 +1,5 @@
+// export.go 编排离线导出主流程：定位源程序 -> 过滤实例 -> 进程占锁前置检查 ->
+// 离线解密 Cookies 与打包 Web Storage/可选指纹/可选代理 -> 封装为可加密的 .antsess 迁移包。
 package main
 
 import (
@@ -12,8 +14,10 @@ import (
 	"time"
 )
 
-const toolVersion = "1.1.0"
+// toolVersion 迁移工具语义化版本号，写入输出摘要与 manifest.json。
+const toolVersion = "1.2.0"
 
+// ExportOptions 定义一次离线导出任务的全部参数。
 type ExportOptions struct {
 	AppRoot               string
 	OutputPath            string
@@ -28,25 +32,29 @@ type ExportOptions struct {
 	IncludeDeleted        bool
 	SkipLocked            bool
 	SkipUnreadable        bool
+	KeychainService       string
+	KeychainPassword      string
 }
 
+// ExportSummary 记录导出完成后的统计结果与风险告警，供 CLI 与交互界面展示。
 type ExportSummary struct {
-	OutputPath              string
-	ArchiveSizeBytes        int64
-	Encrypted               bool
-	ExportedProfiles        int
-	SkippedLockedProfiles   int
-	SkippedUnreadable       int
-	TotalCookies            int
-	TotalGoogleCookies      int
-	ExportedFingerprints    int
-	ExportedProxies         int
-	RotatingGoogleProfiles  int
-	V20Profiles             int
-	DBSCProfiles            int
-	Warnings                []string
+	OutputPath             string
+	ArchiveSizeBytes       int64
+	Encrypted              bool
+	ExportedProfiles       int
+	SkippedLockedProfiles  int
+	SkippedUnreadable      int
+	TotalCookies           int
+	TotalGoogleCookies     int
+	ExportedFingerprints   int
+	ExportedProxies        int
+	RotatingGoogleProfiles int
+	V20Profiles            int
+	DBSCProfiles           int
+	Warnings               []string
 }
 
+// runExport 执行完整离线导出流程；全程不启动浏览器进程、不发起任何网络请求。
 func runExport(opts ExportOptions) (*ExportSummary, error) {
 	if !opts.NoPassword && opts.Password == "" {
 		return nil, fmt.Errorf("未提供密码；如需不加密导出请显式传 --no-password")
@@ -148,7 +156,10 @@ func runExport(opts ExportOptions) (*ExportSummary, error) {
 	for idx, profile := range readyProfiles {
 		fmt.Printf("[%d/%d] 离线导出实例「%s」(%s)...\n", idx+1, len(readyProfiles), profile.ProfileName, shortID(profile.ProfileID))
 
-		cookieRes, err := exportProfileCookies(profile)
+		cookieRes, err := exportProfileCookiesWithOptions(profile, inst, cookieCryptoOptions{
+			KeychainService:  opts.KeychainService,
+			KeychainPassword: opts.KeychainPassword,
+		})
 		if err != nil {
 			if opts.SkipUnreadable {
 				w := fmt.Sprintf("已跳过无法解密的实例「%s」(%s): %v", profile.ProfileName, shortID(profile.ProfileID), err)
@@ -325,6 +336,7 @@ func runExport(opts ExportOptions) (*ExportSummary, error) {
 	return summary, nil
 }
 
+// filterProfiles 按用户指定的实例 ID 或实例名（不区分大小写）筛选待导出实例，并返回未命中的筛选词。
 func filterProfiles(profiles []AppProfile, filters []string) (matched []AppProfile, missing []string) {
 	if len(filters) == 0 {
 		return profiles, nil
@@ -352,10 +364,12 @@ func filterProfiles(profiles []AppProfile, filters []string) (matched []AppProfi
 	return matched, missing
 }
 
+// defaultExportFileName 生成带本地时间戳的默认导出文件名。
 func defaultExportFileName(now time.Time) string {
 	return fmt.Sprintf("ant-sessions-%s%s", now.Format("20060102-150405"), archiveExt)
 }
 
+// shortID 截取 UUID 前 8 位用于日志与摘要对齐展示。
 func shortID(id string) string {
 	if len(id) <= 8 {
 		return id

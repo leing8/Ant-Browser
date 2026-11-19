@@ -1,4 +1,5 @@
 @echo off
+rem Launch ant-session-migrator.exe (auto-builds if missing; interactive menu when no args).
 setlocal
 cd /d "%~dp0"
 

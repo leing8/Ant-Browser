@@ -1,5 +1,7 @@
 //go:build windows
 
+// process_check_windows.go 实现 Windows 平台下的浏览器实例文件占用检测与 Ant Browser 主进程扫描，
+// 防止在实例运行期间读写 SQLite/LevelDB 导致数据损坏或导出陈旧的 Google 动态令牌。
 package main
 
 import (
@@ -12,9 +14,11 @@ import (
 )
 
 const (
+	// Win32 共享冲突与文件锁错误码，用于判定目标文件正被运行中的 Chromium 持有。
 	errorSharingViolation = syscall.Errno(32)
 	errorLockViolation    = syscall.Errno(33)
-	th32csSnapProcess     = 0x00000002
+	// th32csSnapProcess 对应 Toolhelp32 API 的 TH32CS_SNAPPROCESS 标志。
+	th32csSnapProcess = 0x00000002
 )
 
 var (
@@ -23,17 +27,18 @@ var (
 	procProcess32NextW           = modKernel32.NewProc("Process32NextW")
 )
 
+// processEntry32W 对应 Win32 PROCESSENTRY32W 结构体布局。
 type processEntry32W struct {
-	Size              uint32
-	Usage             uint32
-	ProcessID         uint32
-	DefaultHeapID     uintptr
-	ModuleID          uint32
-	Threads           uint32
-	ParentProcessID   uint32
-	PriClassBase      int32
-	Flags             uint32
-	ExeFile           [260]uint16
+	Size            uint32
+	Usage           uint32
+	ProcessID       uint32
+	DefaultHeapID   uintptr
+	ModuleID        uint32
+	Threads         uint32
+	ParentProcessID uint32
+	PriClassBase    int32
+	Flags           uint32
+	ExeFile         [260]uint16
 }
 
 // isFileLockedByOtherProcess 通过零共享只读句柄检测文件是否正被其他进程占用（不会修改文件内容或时间戳）。

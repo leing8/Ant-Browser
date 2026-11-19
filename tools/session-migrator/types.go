@@ -1,10 +1,17 @@
+// types.go 定义迁移工具的核心数据结构，包括 .antsess 归档清单、跨系统 Cookie/指纹/代理快照模型，
+// 以及从 Ant Browser 本地数据库读取的实例与安装目录元信息。
 package main
 
 const (
-	archiveFormat  = "ant-browser-session-migration"
+	// archiveFormat 标识本工具生成的迁移包格式，防止误导入不兼容的 ZIP 文件。
+	archiveFormat = "ant-browser-session-migration"
+	// archiveVersion 迁移包格式主版本号。
 	archiveVersion = 1
-	archiveExt     = ".antsess"
+	// archiveExt 默认迁移包文件后缀。
+	archiveExt = ".antsess"
 
+	// cookieDBVersionCurrent 对应 Chromium 130+ (含 144) Cookies SQLite 表 schema 版本 24：
+	// 该版本在加密 Cookie 明文前追加 32 字节 SHA256(host_key) 用于绑定域名。
 	cookieDBVersionCurrent = 24
 )
 
@@ -29,20 +36,20 @@ type ArchiveManifest struct {
 
 // ArchiveProfileMetadata 描述单个实例的非敏感摘要信息，用于匹配、预览和风控提醒。
 type ArchiveProfileMetadata struct {
-	ProfileID               string   `json:"profileId"`
-	ProfileName             string   `json:"profileName"`
-	CookieCount             int      `json:"cookieCount"`
-	GoogleCookieCount       int      `json:"googleCookieCount"`
-	HasRotatingGoogleTokens bool     `json:"hasRotatingGoogleTokens"`
-	V20CookieCount          int      `json:"v20CookieCount,omitempty"`
-	DBSCSessionCount        int      `json:"dbscSessionCount,omitempty"`
-	HasLocalStorage         bool     `json:"hasLocalStorage"`
-	HasSessionStorage       bool     `json:"hasSessionStorage"`
-	HasIndexedDB            bool     `json:"hasIndexedDB"`
-	HasFingerprint          bool     `json:"hasFingerprint,omitempty"`
-	HasProxy                bool     `json:"hasProxy,omitempty"`
-	ProxySummary            string   `json:"proxySummary,omitempty"`
-	FingerprintHash         string   `json:"fingerprintHash,omitempty"`
+	ProfileID               string `json:"profileId"`
+	ProfileName             string `json:"profileName"`
+	CookieCount             int    `json:"cookieCount"`
+	GoogleCookieCount       int    `json:"googleCookieCount"`
+	HasRotatingGoogleTokens bool   `json:"hasRotatingGoogleTokens"`
+	V20CookieCount          int    `json:"v20CookieCount,omitempty"`
+	DBSCSessionCount        int    `json:"dbscSessionCount,omitempty"`
+	HasLocalStorage         bool   `json:"hasLocalStorage"`
+	HasSessionStorage       bool   `json:"hasSessionStorage"`
+	HasIndexedDB            bool   `json:"hasIndexedDB"`
+	HasFingerprint          bool   `json:"hasFingerprint,omitempty"`
+	HasProxy                bool   `json:"hasProxy,omitempty"`
+	ProxySummary            string `json:"proxySummary,omitempty"`
+	FingerprintHash         string `json:"fingerprintHash,omitempty"`
 	// 仅兼容 v1.0.0 旧包反序列化，v1.1.0+ 新包不再向公开 manifest 写入原始指纹参数。
 	LegacyFingerprintArgs []string `json:"fingerprintArgs,omitempty"`
 }

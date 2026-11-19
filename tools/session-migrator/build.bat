@@ -1,4 +1,5 @@
 @echo off
+rem Build standalone Windows binary ant-session-migrator.exe (pure Go, CGO_ENABLED=0).
 setlocal
 cd /d "%~dp0"
 

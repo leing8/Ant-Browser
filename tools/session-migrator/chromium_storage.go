@@ -1,3 +1,5 @@
+// chromium_storage.go 负责离线打包与原子恢复 Chromium 非 DPAPI 加密的 Web 存储目录
+// （Local Storage/leveldb、Session Storage 与可选 IndexedDB），以及提供原子写/原子替换和备份基础工具。
 package main
 
 import (
@@ -10,6 +12,7 @@ import (
 	"strings"
 )
 
+// storageCategory 描述一类可独立迁移的浏览器 Web Storage 目录。
 type storageCategory struct {
 	Key    string // 归档内逻辑标识
 	RelDir string // 相对于 user_data_dir 的路径
@@ -30,6 +33,7 @@ var (
 	}
 )
 
+// allStorageCategories 返回工具支持的全部 Web Storage 迁移类别列表。
 func allStorageCategories() []storageCategory {
 	return []storageCategory{
 		storageCatLocalStorage,
@@ -38,6 +42,8 @@ func allStorageCategories() []storageCategory {
 	}
 }
 
+// isTransientLevelDBFile 过滤 LevelDB 运行期锁文件与诊断日志（LOCK / LOG / LOG.old），
+// 避免跨机带入脏锁导致目标 Chromium 启动阻塞。
 func isTransientLevelDBFile(fileName string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(fileName))
 	return upper == "LOCK" || upper == "LOG" || upper == "LOG.OLD"
@@ -199,6 +205,7 @@ func restoreProfileStorageCategory(files []*zip.File, targetUserDataDir string, 
 	return restoredFiles, nil
 }
 
+// copyFile 复制单个文件（目标权限收紧为 0600，自动创建父目录）。
 func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
@@ -220,6 +227,7 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
+// copyDir 递归复制目录用于回滚备份，自动忽略符号链接与 LevelDB 临时锁文件。
 func copyDir(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -246,6 +254,7 @@ func copyDir(src, dst string) error {
 	})
 }
 
+// atomicWriteFile 先写入同目录临时文件再原子替换目标文件，防止半写入损坏 Local State 或配置文件。
 func atomicWriteFile(targetPath string, content []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return err
@@ -262,6 +271,7 @@ func atomicWriteFile(targetPath string, content []byte, perm os.FileMode) error 
 	return nil
 }
 
+// atomicReplaceFile 通过“移走旧文件 -> 移入新文件 -> 删除旧文件”三步实现跨平台（含 Windows）安全替换与失败回滚。
 func atomicReplaceFile(tmpPath, targetPath string) error {
 	oldPath := ""
 	if fileExists(targetPath) {

@@ -1,15 +1,10 @@
+// chromium_cookies.go 负责离线读写 Chromium Cookies SQLite 数据库（严格兼容 schema v24）、
+// 检测硬件绑定会话（Device Bound Sessions / DBSC）与 v20 加密，以及按平台加解密器完成 Cookie 重加密与原子落盘。
 package main
 
 import (
-	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,12 +14,17 @@ import (
 )
 
 const (
+	// chromiumV10Prefix / chromiumV11Prefix 为常规 OS 加密前缀（Windows AES-GCM / macOS AES-CBC）。
 	chromiumV10Prefix = "v10"
 	chromiumV11Prefix = "v11"
+	// chromiumV20Prefix 为 Chrome 127+ Windows App-Bound Encryption 前缀，需要系统级 Elevation Service。
 	chromiumV20Prefix = "v20"
-	gcmNonceSize      = 12
+	// gcmNonceSize 为 Windows AES-256-GCM 密文头部随机数长度（96 bit）。
+	gcmNonceSize = 12
 )
 
+// googleRotatingCookieNames 列出 Google 实时动态轮转的会话安全 Cookie 名称，
+// 用于在导出/导入摘要中提醒用户切勿双机并发使用同一 Google 会话。
 var googleRotatingCookieNames = map[string]bool{
 	"__Secure-1PSIDTS": true,
 	"__Secure-3PSIDTS": true,
@@ -33,6 +33,14 @@ var googleRotatingCookieNames = map[string]bool{
 	"__Secure-3PSIDCC": true,
 }
 
+// sampleEncryptedCookie 保存少量真实密文样本，供 macOS 端在多个钥匙串候选中做 SHA256(host_key) 验签。
+type sampleEncryptedCookie struct {
+	HostKey   string
+	EncVal    []byte
+	SchemaVer int
+}
+
+// exportedCookiesResult 汇总单个实例离线解密后的 Cookie 集合、Google 风控特征计数与告警信息。
 type exportedCookiesResult struct {
 	Dump                    ProfileCookieDump
 	GoogleCookieCount       int
@@ -42,6 +50,7 @@ type exportedCookiesResult struct {
 	Warnings                []string
 }
 
+// locateCookiesDBPath 优先定位 Chromium 96+ 沙箱路径 Default/Network/Cookies，兼容更早期版本的 Default/Cookies。
 func locateCookiesDBPath(userDataDir string) string {
 	modern := filepath.Join(userDataDir, "Default", "Network", "Cookies")
 	if fileExists(modern) {
@@ -54,8 +63,31 @@ func locateCookiesDBPath(userDataDir string) string {
 	return ""
 }
 
-// exportProfileCookies 离线读取并解密单个实例的 Chromium Cookies 数据库，同时检测 v20 与 DBSC。
+// exportProfileCookies 离线读取并解密单个实例的 Chromium Cookies 数据库（自动适配 Windows DPAPI 与 macOS Keychain）。
 func exportProfileCookies(profile AppProfile) (*exportedCookiesResult, error) {
+	return exportProfileCookiesWithOptions(profile, nil, cookieCryptoOptions{})
+}
+
+// exportProfileCookiesWithOptions 按给定安装信息与平台加密选项离线读取并解密实例 Cookie。
+func exportProfileCookiesWithOptions(profile AppProfile, inst *AppInstallation, cryptoOpts cookieCryptoOptions) (*exportedCookiesResult, error) {
+	cookiesPath := locateCookiesDBPath(profile.ResolvedDataDir)
+	if cookiesPath == "" {
+		return exportProfileCookiesWithCipher(profile, nil)
+	}
+
+	// 预取最多 3 条 v10/v11 样本供 macOS 多钥匙串候选精确验签
+	samples := readSampleEncryptedCookies(cookiesPath, 3)
+	c, err := openExportCookieCipher(profile.ResolvedDataDir, inst, cryptoOpts, samples)
+	if err != nil {
+		return nil, fmt.Errorf("初始化 Cookie 解密密钥失败（%s）: %w", platformCryptoLabel(), err)
+	}
+	defer c.Close()
+
+	return exportProfileCookiesWithCipher(profile, c)
+}
+
+// exportProfileCookiesWithCipher 使用指定 cookieCipher 解密实例 Cookies SQLite（与平台密钥源解耦，便于跨系统测试）。
+func exportProfileCookiesWithCipher(profile AppProfile, c cookieCipher) (*exportedCookiesResult, error) {
 	result := &exportedCookiesResult{
 		Dump: ProfileCookieDump{
 			SchemaVersion: cookieDBVersionCurrent,
@@ -65,14 +97,14 @@ func exportProfileCookies(profile AppProfile) (*exportedCookiesResult, error) {
 		},
 	}
 
-	// 检测是否存在硬件 TPM 绑定的 Device Bound Sessions (DBSC)
+	// 检测是否存在硬件 TPM / Secure Enclave 绑定的 Device Bound Sessions (DBSC)
 	dbscCount, dbscErr := countDBSCSessions(profile.ResolvedDataDir)
 	if dbscErr != nil {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("检查 Device Bound Sessions 失败: %v", dbscErr))
 	} else if dbscCount > 0 {
 		result.DBSCSessionCount = dbscCount
 		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("检测到 %d 条 Device Bound Sessions (DBSC) 硬件绑定会话，该类会话私钥锁定在本机 TPM，无法跨电脑迁移", dbscCount))
+			fmt.Sprintf("检测到 %d 条 Device Bound Sessions (DBSC) 硬件绑定会话，该类会话私钥锁定在本机硬件安全模块，无法跨电脑迁移", dbscCount))
 	}
 
 	cookiesPath := locateCookiesDBPath(profile.ResolvedDataDir)
@@ -80,14 +112,7 @@ func exportProfileCookies(profile AppProfile) (*exportedCookiesResult, error) {
 		return result, nil
 	}
 
-	keyInfo, err := readLocalStateDPAPIKey(profile.ResolvedDataDir)
-	if err != nil {
-		return nil, fmt.Errorf("解包 Local State DPAPI 密钥失败: %w", err)
-	}
-	if keyInfo.AESKey != nil {
-		defer zeroBytes(keyInfo.AESKey)
-	}
-	if keyInfo.HasAppBoundKey {
+	if c != nil && c.HasAppBoundKey() {
 		result.Warnings = append(result.Warnings, "Local State 包含 app_bound_encrypted_key（若存在 v20 Cookie 将无法离线迁移）")
 	}
 
@@ -154,18 +179,6 @@ func exportProfileCookies(profile AppProfile) (*exportedCookiesResult, error) {
 		colOrZero("has_cross_site_ancestor"),
 	)
 
-	var aead cipher.AEAD
-	if len(keyInfo.AESKey) == 32 {
-		block, cErr := aes.NewCipher(keyInfo.AESKey)
-		if cErr != nil {
-			return nil, fmt.Errorf("初始化 AES 解密器失败: %w", cErr)
-		}
-		aead, cErr = cipher.NewGCM(block)
-		if cErr != nil {
-			return nil, fmt.Errorf("初始化 AES-GCM 解密器失败: %w", cErr)
-		}
-	}
-
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("查询 Cookies 行失败: %w", err)
@@ -204,38 +217,26 @@ func exportProfileCookies(profile AppProfile) (*exportedCookiesResult, error) {
 		}
 
 		if len(encVal) > 0 {
-			if len(encVal) < 3 {
+			if c == nil {
+				return nil, fmt.Errorf("存在加密 Cookie，但缺少可用的平台解密密钥")
+			}
+			plain, hashMatched, skippedV20, unknownPrefix, decErr := c.DecryptCookie(encVal, rec.HostKey, schemaVer)
+			if decErr != nil {
+				return nil, fmt.Errorf("解密 Cookie (%s / %s) 失败: %w", rec.HostKey, rec.Name, decErr)
+			}
+			if skippedV20 {
+				result.V20CookieCount++
+				continue
+			}
+			if unknownPrefix {
 				unknownPrefixCount++
 				continue
 			}
-			prefix := string(encVal[:3])
-			switch prefix {
-			case chromiumV10Prefix, chromiumV11Prefix:
-				if aead == nil {
-					return nil, fmt.Errorf("存在加密 Cookie，但缺少可用的 Local State DPAPI 密钥")
-				}
-				plain, hashMatched, decErr := decryptChromiumV10Cookie(aead, encVal, rec.HostKey, schemaVer)
-				if decErr != nil {
-					return nil, fmt.Errorf("解密 Cookie (%s / %s) 失败: %w", rec.HostKey, rec.Name, decErr)
-				}
-				if schemaVer >= 24 && !hashMatched {
-					hashMismatchCount++
-				}
-				rec.Value = plain
-				rec.WasPlaintext = false
-			case chromiumV20Prefix:
-				result.V20CookieCount++
-				continue
-			default:
-				// 极老版本 Windows DPAPI 直接加密的 Cookie（无 v10 前缀）
-				if plainBytes, dErr := dpapiUnprotect(encVal); dErr == nil {
-					rec.Value = string(plainBytes)
-					rec.WasPlaintext = false
-				} else {
-					unknownPrefixCount++
-					continue
-				}
+			if schemaVer >= 24 && !hashMatched {
+				hashMismatchCount++
 			}
+			rec.Value = plain
+			rec.WasPlaintext = false
 		} else {
 			rec.WasPlaintext = true
 		}
@@ -268,92 +269,93 @@ func exportProfileCookies(profile AppProfile) (*exportedCookiesResult, error) {
 	return result, nil
 }
 
-func decryptChromiumV10Cookie(aead cipher.AEAD, encVal []byte, hostKey string, schemaVer int) (value string, hashMatched bool, err error) {
-	if len(encVal) < 3+gcmNonceSize+aead.Overhead() {
-		return "", false, errors.New("v10 密文长度不足")
-	}
-	nonce := encVal[3 : 3+gcmNonceSize]
-	ciphertext := encVal[3+gcmNonceSize:]
-	plain, err := aead.Open(nil, nonce, ciphertext, nil)
+// readSampleEncryptedCookies 从 Cookies 只读快照中抽取最多 limit 条 v10/v11 密文样本用于密钥校验。
+func readSampleEncryptedCookies(cookiesPath string, limit int) []sampleEncryptedCookie {
+	snapshotPath, cleanup, err := snapshotSQLiteToTemp(cookiesPath)
 	if err != nil {
-		return "", false, err
+		return nil
 	}
-	defer zeroBytes(plain)
+	defer cleanup()
 
-	if schemaVer >= 24 {
-		expectedHash := sha256.Sum256([]byte(hostKey))
-		if len(plain) >= sha256.Size && bytes.Equal(plain[:sha256.Size], expectedHash[:]) {
-			return string(plain[sha256.Size:]), true, nil
+	db, err := sql.Open("sqlite", snapshotPath)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+
+	schemaVer := readCookiesSchemaVersion(db)
+	rows, err := db.Query(`SELECT host_key, encrypted_value FROM cookies WHERE length(encrypted_value) > 3 LIMIT ?`, limit*3)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var samples []sampleEncryptedCookie
+	for rows.Next() && len(samples) < limit {
+		var host string
+		var enc []byte
+		if rows.Scan(&host, &enc) == nil && len(enc) > 3 {
+			pref := string(enc[:3])
+			if pref == chromiumV10Prefix || pref == chromiumV11Prefix {
+				samples = append(samples, sampleEncryptedCookie{
+					HostKey:   host,
+					EncVal:    append([]byte(nil), enc...),
+					SchemaVer: schemaVer,
+				})
+			}
 		}
-		return string(plain), false, nil
 	}
-	return string(plain), true, nil
+	return samples
 }
 
-func encryptChromiumV10Cookie(aead cipher.AEAD, hostKey string, value string) ([]byte, error) {
-	hostHash := sha256.Sum256([]byte(hostKey))
-	plain := make([]byte, sha256.Size+len(value))
-	copy(plain[:sha256.Size], hostHash[:])
-	copy(plain[sha256.Size:], value)
-	defer zeroBytes(plain)
-
-	nonce := make([]byte, gcmNonceSize)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, fmt.Errorf("生成 Cookie 随机数失败: %w", err)
-	}
-	sealed := aead.Seal(nil, nonce, plain, nil)
-
-	out := make([]byte, 0, len(chromiumV10Prefix)+len(nonce)+len(sealed))
-	out = append(out, []byte(chromiumV10Prefix)...)
-	out = append(out, nonce...)
-	out = append(out, sealed...)
-	return out, nil
-}
-
+// cookieUniqueKey 构造与 Chromium cookies_unique_index 完全一致的 7 元组复合键，供 merge 模式去重覆盖。
 func cookieUniqueKey(c PortableCookieRecord) string {
 	return fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%s\x00%d\x00%d",
 		c.HostKey, c.TopFrameSiteKey, c.HasCrossSiteAncestor, c.Name, c.Path, c.SourceScheme, c.SourcePort)
 }
 
-// importProfileCookies 使用目标机 DPAPI 主密钥重新加密并原子写入 Default/Network/Cookies（Chromium v24 规范）。
+// importProfileCookies 使用目标机原生加密机制重新加密并原子写入 Default/Network/Cookies（Chromium v24 规范）。
 func importProfileCookies(targetUserDataDir string, dump ProfileCookieDump, cookieMode string, backupDir string) (written int, reusedKey bool, err error) {
-	aesKey, reused, err := ensureTargetLocalStateDPAPIKey(targetUserDataDir)
-	if err != nil {
-		return 0, false, err
-	}
-	defer zeroBytes(aesKey)
+	w, reused, _, err := importProfileCookiesWithOptions(targetUserDataDir, nil, cookieCryptoOptions{}, dump, cookieMode, backupDir)
+	return w, reused, err
+}
 
-	block, err := aes.NewCipher(aesKey)
+// importProfileCookiesWithOptions 获取/初始化目标机密钥并完成 Cookie 重加密原子写入，同时返回平台提示信息。
+func importProfileCookiesWithOptions(targetUserDataDir string, inst *AppInstallation, cryptoOpts cookieCryptoOptions, dump ProfileCookieDump, cookieMode string, backupDir string) (written int, reusedKey bool, notice string, err error) {
+	c, reused, err := ensureImportCookieCipher(targetUserDataDir, inst, cryptoOpts)
 	if err != nil {
-		return 0, reused, fmt.Errorf("创建目标 AES 加密器失败: %w", err)
+		return 0, false, "", err
 	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return 0, reused, fmt.Errorf("创建目标 AES-GCM 加密器失败: %w", err)
-	}
+	defer c.Close()
 
+	written, err = importProfileCookiesWithCipher(targetUserDataDir, c, dump, cookieMode, backupDir)
+	return written, reused, c.Notice(), err
+}
+
+// importProfileCookiesWithCipher 使用指定 cookieCipher 重建符合 Chromium 144 (v24) 规范的 Cookies 数据库并原子替换。
+func importProfileCookiesWithCipher(targetUserDataDir string, c cookieCipher, dump ProfileCookieDump, cookieMode string, backupDir string) (written int, err error) {
 	finalCookies := dump.Cookies
 	if strings.EqualFold(cookieMode, "merge") {
-		existingRes, readErr := exportProfileCookies(AppProfile{
+		existingRes, readErr := exportProfileCookiesWithCipher(AppProfile{
 			ProfileID:       dump.ProfileID,
 			ProfileName:     dump.ProfileName,
 			ResolvedDataDir: targetUserDataDir,
-		})
+		}, c)
 		if readErr == nil && existingRes != nil && len(existingRes.Dump.Cookies) > 0 {
 			merged := make([]PortableCookieRecord, 0, len(existingRes.Dump.Cookies)+len(dump.Cookies))
 			indexByKey := make(map[string]int, len(existingRes.Dump.Cookies)+len(dump.Cookies))
-			for _, c := range existingRes.Dump.Cookies {
-				k := cookieUniqueKey(c)
+			for _, item := range existingRes.Dump.Cookies {
+				k := cookieUniqueKey(item)
 				indexByKey[k] = len(merged)
-				merged = append(merged, c)
+				merged = append(merged, item)
 			}
-			for _, c := range dump.Cookies {
-				k := cookieUniqueKey(c)
+			for _, item := range dump.Cookies {
+				k := cookieUniqueKey(item)
 				if idx, ok := indexByKey[k]; ok {
-					merged[idx] = c
+					merged[idx] = item
 				} else {
 					indexByKey[k] = len(merged)
-					merged = append(merged, c)
+					merged = append(merged, item)
 				}
 			}
 			finalCookies = merged
@@ -362,7 +364,7 @@ func importProfileCookies(targetUserDataDir string, dump ProfileCookieDump, cook
 
 	networkDir := filepath.Join(targetUserDataDir, "Default", "Network")
 	if err := os.MkdirAll(networkDir, 0o755); err != nil {
-		return 0, reused, fmt.Errorf("创建目标 Default/Network 目录失败: %w", err)
+		return 0, fmt.Errorf("创建目标 Default/Network 目录失败: %w", err)
 	}
 
 	tmpDBPath := filepath.Join(networkDir, fmt.Sprintf("Cookies.migrator.%d.tmp", os.Getpid()))
@@ -376,7 +378,7 @@ func importProfileCookies(targetUserDataDir string, dump ProfileCookieDump, cook
 
 	db, err := sql.Open("sqlite", tmpDBPath)
 	if err != nil {
-		return 0, reused, fmt.Errorf("创建临时 Cookies 数据库失败: %w", err)
+		return 0, fmt.Errorf("创建临时 Cookies 数据库失败: %w", err)
 	}
 	db.SetMaxOpenConns(1)
 
@@ -418,50 +420,50 @@ func importProfileCookies(targetUserDataDir string, dump ProfileCookieDump, cook
 		}
 		defer insertStmt.Close()
 
-		for _, c := range finalCookies {
+		for _, rec := range finalCookies {
 			plainVal := ""
 			var encVal []byte
-			if c.WasPlaintext && c.Value != "" {
-				plainVal = c.Value
+			if rec.WasPlaintext && rec.Value != "" {
+				plainVal = rec.Value
 				encVal = []byte{}
 			} else {
 				var encErr error
-				encVal, encErr = encryptChromiumV10Cookie(aead, c.HostKey, c.Value)
+				encVal, encErr = c.EncryptCookie(rec.HostKey, rec.Value)
 				if encErr != nil {
 					return encErr
 				}
 			}
 
 			if _, err := insertStmt.Exec(
-				c.CreationUTC,
-				c.HostKey,
-				c.TopFrameSiteKey,
-				c.Name,
+				rec.CreationUTC,
+				rec.HostKey,
+				rec.TopFrameSiteKey,
+				rec.Name,
 				plainVal,
 				encVal,
-				c.Path,
-				c.ExpiresUTC,
-				c.IsSecure,
-				c.IsHTTPOnly,
-				c.LastAccessUTC,
-				c.HasExpires,
-				c.IsPersistent,
-				c.Priority,
-				c.SameSite,
-				c.SourceScheme,
-				c.SourcePort,
-				c.LastUpdateUTC,
-				c.SourceType,
-				c.HasCrossSiteAncestor,
+				rec.Path,
+				rec.ExpiresUTC,
+				rec.IsSecure,
+				rec.IsHTTPOnly,
+				rec.LastAccessUTC,
+				rec.HasExpires,
+				rec.IsPersistent,
+				rec.Priority,
+				rec.SameSite,
+				rec.SourceScheme,
+				rec.SourcePort,
+				rec.LastUpdateUTC,
+				rec.SourceType,
+				rec.HasCrossSiteAncestor,
 			); err != nil {
-				return fmt.Errorf("写入 Cookie (%s / %s) 失败: %w", c.HostKey, c.Name, err)
+				return fmt.Errorf("写入 Cookie (%s / %s) 失败: %w", rec.HostKey, rec.Name, err)
 			}
 		}
 
 		return tx.Commit()
 	}()
 	if buildErr != nil {
-		return 0, reused, buildErr
+		return 0, buildErr
 	}
 
 	targetCookiesPath := filepath.Join(networkDir, "Cookies")
@@ -471,30 +473,29 @@ func importProfileCookies(targetUserDataDir string, dump ProfileCookieDump, cook
 			if fileExists(src) {
 				dst := filepath.Join(backupDir, "Default", "Network", "Cookies"+suffix)
 				if err := copyFile(src, dst); err != nil {
-					return 0, reused, fmt.Errorf("备份原 Cookies 文件失败: %w", err)
+					return 0, fmt.Errorf("备份原 Cookies 文件失败: %w", err)
 				}
 			}
 		}
 	}
 
-	// 清理旧的 journal/wal/shm 避免和新的 Cookies 数据库不一致
 	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
 		_ = os.Remove(targetCookiesPath + suffix)
 	}
 
 	if err := atomicReplaceFile(tmpDBPath, targetCookiesPath); err != nil {
-		return 0, reused, fmt.Errorf("替换目标 Cookies 数据库失败: %w", err)
+		return 0, fmt.Errorf("替换目标 Cookies 数据库失败: %w", err)
 	}
 
-	// 写入 Chromium Network Service 迁移检查点标记，确保新实例启动时直接读取 Default/Network/Cookies
 	migratedMarker := filepath.Join(networkDir, "NetworkDataMigrated")
 	if !fileExists(migratedMarker) {
 		_ = os.WriteFile(migratedMarker, []byte{}, 0o644)
 	}
 
-	return len(finalCookies), reused, nil
+	return len(finalCookies), nil
 }
 
+// readCookiesSchemaVersion 读取 Cookies 库 meta.version 字段，读取失败时按当前版本 24 处理。
 func readCookiesSchemaVersion(db *sql.DB) int {
 	var raw string
 	if err := db.QueryRow(`SELECT value FROM meta WHERE key = 'version'`).Scan(&raw); err != nil {
@@ -506,6 +507,7 @@ func readCookiesSchemaVersion(db *sql.DB) int {
 	return cookieDBVersionCurrent
 }
 
+// countDBSCSessions 统计 Default/Network/Device Bound Sessions 中的硬件绑定会话行数，用于提前预警不可跨机迁移的 DBSC 会话。
 func countDBSCSessions(userDataDir string) (int, error) {
 	dbscPath := filepath.Join(userDataDir, "Default", "Network", "Device Bound Sessions")
 	if !fileExists(dbscPath) {
@@ -547,6 +549,7 @@ func countDBSCSessions(userDataDir string) (int, error) {
 	return total, nil
 }
 
+// isGoogleDomain 判断 host_key 是否属于 Google / YouTube 生态域名，仅用于统计摘要。
 func isGoogleDomain(host string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {

@@ -1,3 +1,6 @@
+// proxy_fingerprint.go 实现可选的「核心指纹」与「最小代理 IP 节点」提取与入库协调逻辑：
+// - 导出侧：物化确定性指纹种子；仅提取被选中实例实际引用的代理节点或虚拟分组，不导出订阅链接与测速缓存；
+// - 导入侧：写入前自动备份 app.db；在单事务中按 proxy_config 去重复用目标节点，遇冲突 ID 自动改号绝不覆盖无关代理。
 package main
 
 import (
@@ -13,8 +16,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// directProxyID 是 Ant Browser 内置直连节点的保留代理 ID。
 const directProxyID = "__direct__"
 
+// normalizeProxyMode 规范化实例代理模式，缺省回退为 fixed。
 func normalizeProxyMode(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "dynamic":
@@ -40,6 +45,8 @@ func deriveFingerprintSeedFromProfileID(profileID string) int {
 	return seed
 }
 
+// materializeEffectiveFingerprintArgs 清理空白指纹参数；若未包含 --fingerprint=，
+// 则按源 profileID 补齐显式种子，保证跨机匹配不同实例 ID 时浏览器指纹完全一致。
 func materializeEffectiveFingerprintArgs(profileID string, rawArgs []string) []string {
 	clean := make([]string, 0, len(rawArgs)+1)
 	hasSeed := false
@@ -61,12 +68,15 @@ func materializeEffectiveFingerprintArgs(profileID string, rawArgs []string) []s
 	return clean
 }
 
+// sourceProxyCatalog 缓存源端代理池与虚拟分组（以只读方式合并 config.yaml 与 app.db），
+// 用于导出阶段按需反查被选中实例引用的最小节点定义。
 type sourceProxyCatalog struct {
 	ProxiesByID       map[string]PortableProxyNode
 	VirtualGroupsByID map[string]PortableVirtualGroup
 	VirtualGroupsByNm map[string]PortableVirtualGroup
 }
 
+// loadSourceProxyCatalog 从源端 config.yaml 与 app.db 只读快照加载代理节点及虚拟分组目录。
 func loadSourceProxyCatalog(inst *AppInstallation) (*sourceProxyCatalog, error) {
 	cat := &sourceProxyCatalog{
 		ProxiesByID:       make(map[string]PortableProxyNode),
@@ -248,6 +258,7 @@ func buildPortableProxyDump(profile AppProfile, cat *sourceProxyCatalog) (*Porta
 	return nil, ""
 }
 
+// extractProxyProtocol 提取代理 URI 协议头（如 socks5 / vless / hysteria2），仅用于非敏感摘要展示，绝不暴露 IP 或凭据。
 func extractProxyProtocol(proxyConfig string) string {
 	cfg := strings.TrimSpace(proxyConfig)
 	if cfg == "" {
@@ -259,6 +270,7 @@ func extractProxyProtocol(proxyConfig string) string {
 	return "custom"
 }
 
+// profileDBExtraUpdate 描述单个目标实例需要在 app.db 中同步的指纹与代理变更。
 type profileDBExtraUpdate struct {
 	TargetProfileID string
 	SyncFingerprint bool
@@ -267,6 +279,7 @@ type profileDBExtraUpdate struct {
 	ProxyDump       *PortableProxyDump
 }
 
+// proxySyncStats 汇总一次导入事务中指纹与代理节点的复用/新增计数。
 type proxySyncStats struct {
 	FingerprintsUpdated int
 	ProxiesBound        int
@@ -619,6 +632,7 @@ func applyProfileExtrasInDB(inst *AppInstallation, updates []profileDBExtraUpdat
 	return stats, nil
 }
 
+// dynamicInsertRow 根据目标表实际列元信息动态拼装 INSERT 语句，自动为未来新增的 NOT NULL 无默认值列填充安全零值。
 func dynamicInsertRow(tx *sql.Tx, tableName string, colDetails []columnDetail, valuesByCol map[string]any) error {
 	var cols []string
 	var placeholders []string

@@ -1,5 +1,8 @@
 //go:build windows
 
+// migrator_test.go 覆盖 DPAPI 往返、加密/明文迁移包、已有/空目标导入、DBSC 与 v20 检测、
+// 可选代理与指纹迁移（含去重与冲突保护）、真实 Chromium 144 内核离线解密与进程占锁集成验证，
+// 以及 macOS AES-128-CBC/PBKDF2 与 Windows ↔ macOS 跨系统往返测试。
 package main
 
 import (
@@ -25,6 +28,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// createTestAppRoot 在临时目录构建包含 config.yaml 与空表结构 data/app.db 的模拟 Ant Browser 实例根目录。
 func createTestAppRoot(t *testing.T, profiles []AppProfile) string {
 	t.Helper()
 	root := t.TempDir()
@@ -114,6 +118,7 @@ func createTestAppRoot(t *testing.T, profiles []AppProfile) string {
 	return root
 }
 
+// TestDPAPIRoundTrip 验证本机 Windows DPAPI 加解密往返一致且密文不等于明文。
 func TestDPAPIRoundTrip(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	enc, err := dpapiProtect(secret)
@@ -132,6 +137,8 @@ func TestDPAPIRoundTrip(t *testing.T) {
 	}
 }
 
+// TestFullExportImportToExistingAndMissingTargets 验证加密/明文导出导入至已有实例与自动建空壳实例的完整闭环，
+// 确保默认纯登录态模式绝不篡改目标指纹、代理或无关配置。
 func TestFullExportImportToExistingAndMissingTargets(t *testing.T) {
 	srcProfile := AppProfile{
 		ProfileID:       "11111111-1111-4111-8111-111111111111",
@@ -256,16 +263,16 @@ func TestFullExportImportToExistingAndMissingTargets(t *testing.T) {
 		ProfileName:   targetExisting.ProfileName,
 		Cookies: []PortableCookieRecord{
 			{
-				CreationUTC: 13360000000000000,
-				HostKey:     ".other.example",
-				Name:        "old_cookie",
-				Value:       "keep-on-merge",
-				Path:        "/",
-				ExpiresUTC:  13450000000000000,
-				HasExpires:  1,
+				CreationUTC:  13360000000000000,
+				HostKey:      ".other.example",
+				Name:         "old_cookie",
+				Value:        "keep-on-merge",
+				Path:         "/",
+				ExpiresUTC:   13450000000000000,
+				HasExpires:   1,
 				IsPersistent: 1,
 				SourceScheme: 2,
-				SourcePort:  443,
+				SourcePort:   443,
 			},
 		},
 	}, "replace", ""); err != nil {
@@ -386,6 +393,7 @@ func TestFullExportImportToExistingAndMissingTargets(t *testing.T) {
 	}
 }
 
+// TestDBSCAndV20Detection 验证对 Device Bound Sessions (DBSC) 硬件会话表与 v20 App-Bound Cookie 的识别告警能力。
 func TestDBSCAndV20Detection(t *testing.T) {
 	dir := t.TempDir()
 	netDir := filepath.Join(dir, "Default", "Network")
@@ -541,6 +549,8 @@ func TestRealChromium144LoadsImportedCookies(t *testing.T) {
 	t.Fatal("expected checkProfileDirInUse=false after Chromium 144 exited")
 }
 
+// TestOptionalProxyAndFingerprintMigration 验证可选「核心指纹」与「最小代理节点/虚拟分组」迁移：
+// 包含确定性指纹种子物化、按 proxy_config 去重复用、ID 冲突自动改号保护及隔离未引用节点。
 func TestOptionalProxyAndFingerprintMigration(t *testing.T) {
 	// 源端包含两个实例：
 	// p1: 绑定普通代理池节点（且未显式配置 --fingerprint= 种子，测试确定性种子物化）
@@ -776,6 +786,119 @@ func TestOptionalProxyAndFingerprintMigration(t *testing.T) {
 	}
 }
 
+// TestMacOSCipherAndCrossOSMigrationRoundTrip 验证 macOS Chromium os_crypt_mac.mm 加密规范
+// （PBKDF2-HMAC-SHA1, salt="saltysalt", iter=1003, AES-128-CBC, IV=16空格, PKCS#7, v24 SHA256(host_key)）
+// 并完成 Windows DPAPI (AES-256-GCM) <-> macOS Keychain (AES-128-CBC) 完整跨系统 Cookies SQLite 往返测试。
+func TestMacOSCipherAndCrossOSMigrationRoundTrip(t *testing.T) {
+	// 1. 校验标准 Chromium macOS PBKDF2 派生密钥长度与确定性
+	kPeanuts := deriveMacOSCookieKey("peanuts")
+	if len(kPeanuts) != 16 {
+		t.Fatalf("expected 16-byte AES-128 key, got %d", len(kPeanuts))
+	}
+	// Chromium macOS 已知向量：PBKDF2-HMAC-SHA1("peanuts", "saltysalt", 1003, 16) = d9a09d499b4e1b7461f28e67972c6dbd
+	if gotHex := fmt.Sprintf("%x", kPeanuts); gotHex != "d9a09d499b4e1b7461f28e67972c6dbd" {
+		t.Fatalf("macOS PBKDF2 key mismatch: got %s want d9a09d499b4e1b7461f28e67972c6dbd", gotHex)
+	}
+
+	macSecret := "dGVzdC1tYWNvcy1rZXljaGFpbg=="
+	macCipher, err := newMacOSCBCCookieCipher(macSecret, "")
+	if err != nil {
+		t.Fatalf("newMacOSCBCCookieCipher: %v", err)
+	}
+	defer macCipher.Close()
+
+	// 2. 边界长度测试（0, 1, 15, 16, 17, 32, 多块 UTF-8）
+	edgeValues := []string{
+		"",
+		"a",
+		strings.Repeat("x", 15),
+		strings.Repeat("y", 16),
+		strings.Repeat("z", 17),
+		strings.Repeat("w", 32),
+		"__Secure-1PSIDTS=sidts-CjIB_中文_token_1234567890abcdef",
+	}
+	for _, val := range edgeValues {
+		enc, err := macCipher.EncryptCookie(".google.com", val)
+		if err != nil {
+			t.Fatalf("macOS encrypt %q failed: %v", val, err)
+		}
+		if string(enc[:3]) != "v10" {
+			t.Fatalf("expected v10 prefix, got %q", string(enc[:3]))
+		}
+		if (len(enc)-3)%16 != 0 {
+			t.Fatalf("macOS AES-CBC ciphertext not 16-byte aligned: %d", len(enc)-3)
+		}
+		dec, hashMatched, skippedV20, unknownPrefix, err := macCipher.DecryptCookie(enc, ".google.com", 24)
+		if err != nil || !hashMatched || skippedV20 || unknownPrefix || dec != val {
+			t.Fatalf("macOS decrypt mismatch for %q: dec=%q matched=%v err=%v", val, dec, hashMatched, err)
+		}
+		// 域名不匹配时应报告 hashMatched=false
+		_, wrongHostMatched, _, _, err := macCipher.DecryptCookie(enc, ".evil.example", 24)
+		if err != nil || wrongHostMatched {
+			t.Fatalf("expected hashMatched=false for wrong host, got matched=%v err=%v", wrongHostMatched, err)
+		}
+	}
+
+	// 错误 Keychain 密钥应触发解密失败或哈希不匹配
+	wrongMacCipher, _ := newMacOSCBCCookieCipher("wrong-keychain-secret", "")
+	defer wrongMacCipher.Close()
+	sampleEnc, _ := macCipher.EncryptCookie(".google.com", "super-secret-sid-value")
+	if _, matched, _, _, err := wrongMacCipher.DecryptCookie(sampleEnc, ".google.com", 24); err == nil && matched {
+		t.Fatal("wrong macOS keychain secret unexpectedly succeeded with v24 hash match")
+	}
+
+	// 3. 完整跨系统往返：Windows DPAPI 写入 -> Windows 导出明文 -> macOS AES-128-CBC 写入 SQLite -> macOS 解密导出 -> Windows DPAPI 回写验证
+	winDir := t.TempDir()
+	origCookies := []PortableCookieRecord{
+		{
+			CreationUTC: 13370000000000000, HostKey: ".google.com", Name: "SID", Value: "win-to-mac-sid-001",
+			Path: "/", ExpiresUTC: 13450000000000000, IsSecure: 1, IsHTTPOnly: 1, HasExpires: 1, IsPersistent: 1,
+			Priority: 2, SameSite: -1, SourceScheme: 2, SourcePort: 443, SourceType: 1,
+		},
+		{
+			CreationUTC: 13370000000000001, HostKey: "accounts.google.com", Name: "__Host-GAPS", Value: "1:gaps-token-xyz",
+			Path: "/", ExpiresUTC: 13450000000000000, IsSecure: 1, IsHTTPOnly: 1, HasExpires: 1, IsPersistent: 1,
+			Priority: 2, SameSite: 0, SourceScheme: 2, SourcePort: 443, SourceType: 1,
+		},
+	}
+	if _, _, err := importProfileCookies(winDir, ProfileCookieDump{
+		SchemaVersion: cookieDBVersionCurrent, ProfileID: "cross-os", ProfileName: "cross-os", Cookies: origCookies,
+	}, "replace", ""); err != nil {
+		t.Fatalf("Windows seed failed: %v", err)
+	}
+	fromWin, err := exportProfileCookies(AppProfile{ProfileID: "cross-os", ProfileName: "cross-os", ResolvedDataDir: winDir})
+	if err != nil {
+		t.Fatalf("Windows export failed: %v", err)
+	}
+
+	// 写入模拟的 macOS 目标目录（使用 macOS Keychain AES-128-CBC cipher）
+	macDir := t.TempDir()
+	written, err := importProfileCookiesWithCipher(macDir, macCipher, fromWin.Dump, "replace", "")
+	if err != nil || written != 2 {
+		t.Fatalf("macOS import failed: written=%d err=%v", written, err)
+	}
+	if !fileExists(filepath.Join(macDir, "Default", "Network", "NetworkDataMigrated")) {
+		t.Fatal("missing NetworkDataMigrated marker in macOS target dir")
+	}
+	// macOS 不应生成 Windows DPAPI Local State
+	if fileExists(filepath.Join(macDir, "Local State")) {
+		t.Fatal("macOS import should not create Windows DPAPI Local State")
+	}
+
+	// 从 macOS 目录用 macOS cipher 解密读出并比对全部字段
+	fromMac, err := exportProfileCookiesWithCipher(AppProfile{ProfileID: "cross-os", ProfileName: "cross-os", ResolvedDataDir: macDir}, macCipher)
+	if err != nil {
+		t.Fatalf("macOS export failed: %v", err)
+	}
+	if len(fromMac.Dump.Cookies) != 2 || fromMac.Dump.Cookies[0].Value != "win-to-mac-sid-001" || fromMac.Dump.Cookies[1].Value != "1:gaps-token-xyz" {
+		t.Fatalf("macOS round-trip cookie mismatch: %+v", fromMac.Dump.Cookies)
+	}
+	if fromMac.GoogleCookieCount != 2 {
+		t.Fatalf("expected GoogleCookieCount=2, got %d", fromMac.GoogleCookieCount)
+	}
+}
+
+// waitForCDPBrowserWS 轮询本机 Chrome DevTools Protocol /json/version 端点直至返回浏览器 WebSocket 地址。
 func waitForCDPBrowserWS(port int, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 800 * time.Millisecond}
@@ -853,11 +976,13 @@ func callCDPStorageGetCookies(wsURL string) (string, error) {
 	return readWSTextFrame(br)
 }
 
+// computeWSAccept 按 RFC 6455 计算 WebSocket 握手响应头 Sec-WebSocket-Accept。
 func computeWSAccept(secKey string) string {
 	h := sha1.Sum([]byte(secKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 	return base64.StdEncoding.EncodeToString(h[:])
 }
 
+// writeMaskedWSTextFrame 构造并写入带随机掩码的 RFC 6455 客户端文本帧。
 func writeMaskedWSTextFrame(w io.Writer, payload []byte) error {
 	var hdr []byte
 	hdr = append(hdr, 0x81) // FIN + text frame
@@ -888,6 +1013,7 @@ func writeMaskedWSTextFrame(w io.Writer, payload []byte) error {
 	return err
 }
 
+// readWSTextFrame 读取并解码单条 RFC 6455 服务端 WebSocket 文本帧。
 func readWSTextFrame(br *bufio.Reader) (string, error) {
 	b1, err := br.ReadByte()
 	if err != nil {

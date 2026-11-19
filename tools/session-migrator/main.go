@@ -1,3 +1,5 @@
+// main.go 为零耦合独立迁移工具的 CLI 与中文交互式菜单入口。
+// 无参运行（如直接双击 .exe / .command）自动进入交互引导模式；传参运行支持 export / import / inspect 子命令。
 package main
 
 import (
@@ -10,12 +12,15 @@ import (
 	"time"
 )
 
+// multiStringFlag 支持同一 CLI 参数重复传入或逗号分隔（如 --profile "a,b" --profile "c"）。
 type multiStringFlag []string
 
+// String 实现 flag.Value 接口，将多值参数拼接为逗号分隔字符串。
 func (m *multiStringFlag) String() string {
 	return strings.Join(*m, ",")
 }
 
+// Set 实现 flag.Value 接口，支持逗号拆分子项并追加到参数切片。
 func (m *multiStringFlag) Set(val string) error {
 	for _, part := range strings.Split(val, ",") {
 		if trimmed := strings.TrimSpace(part); trimmed != "" {
@@ -25,6 +30,7 @@ func (m *multiStringFlag) Set(val string) error {
 	return nil
 }
 
+// main 根据命令行参数分发子命令，无参数时默认进入交互式向导菜单。
 func main() {
 	if len(os.Args) < 2 {
 		runInteractive()
@@ -61,14 +67,15 @@ func main() {
 	}
 }
 
+// printUsage 输出 CLI 子命令说明与常用示例。
 func printUsage() {
 	fmt.Printf(`Ant Browser 账号登录态离线迁移工具 v%s（零耦合独立版）
 
 核心特点：
-  - 全程离线通过 Windows DPAPI 解密并按目标机 DPAPI 重新加密（不启动浏览器、零网络请求）
+  - 全程离线加解密（Windows: DPAPI+AES-256-GCM；macOS: Keychain Safe Storage+AES-128-CBC），支持 Windows <-> macOS 跨系统迁移，不启动浏览器、零网络请求
   - 默认仅迁移账号登录态（Cookies + Local Storage + Session Storage），绝不触碰其他无关配置
   - 可按需开启「核心指纹」与「代理 IP 绑定」干净迁移（防 Google 风控一步到位，不含订阅/测速/插件/书签）
-  - 同时兼容开发版（.\bat\dev.bat）与 Windows 正式版（安装版/便携版）
+  - 同时兼容开发版、Windows 正式版与 macOS 正式版（自动定位 ~/Library/Application Support/ant-browser）
 
 用法：
   ant-session-migrator                       进入交互式菜单（适合直接双击或配合 .bat 使用）
@@ -89,10 +96,12 @@ func printUsage() {
   --include-proxy            [可选] 附带导出实例绑定的最小代理 IP 节点（默认关闭，不含订阅/测速历史，存放在加密载荷内）
   --include-deleted          包含回收站中的已删除实例（默认关闭）
   --skip-locked              遇到运行中的实例自动跳过（默认报错提醒先关闭）
-  --skip-unreadable          遇到本机 DPAPI 无法解密的异常/跨机遗留实例自动跳过并告警（默认报错中止）
+  --skip-unreadable          遇到本机密钥无法解密的异常/跨机遗留实例自动跳过并告警（默认报错中止）
+  --keychain-service <名称>  [仅 macOS] 指定钥匙串项名（默认自动识别 Chromium Safe Storage / Chrome Safe Storage）
+  --keychain-password <密码> [仅 macOS] 手动指定 Safe Storage 密钥（也可用环境变量 ANT_KEYCHAIN_PASSWORD）
 
 导入选项（import）：
-  --app-root <目录>          目标 Ant Browser 目录（dev 仓库根目录或正式版安装目录）
+  --app-root <目录>          目标 Ant Browser 目录（dev 仓库、Windows 正式版或 macOS .app / Application Support 目录）
   --in <文件>                待导入的 .antsess 迁移包路径
   --password <密码>          解密密码（仅加密包需要）
   --password-env <变量名>    从环境变量读取解密密码
@@ -105,9 +114,12 @@ func printUsage() {
   --dry-run                  仅预览匹配结果，不写入任何文件
   --no-backup                覆盖前不生成本地回滚备份（默认会自动备份 Cookie/存储与 app.db）
   --force                    跳过 Ant Browser 主程序运行检查（不推荐）
+  --keychain-service <名称>  [仅 macOS] 指定钥匙串项名（默认自动识别 Chromium Safe Storage / Chrome Safe Storage）
+  --keychain-password <密码> [仅 macOS] 手动指定 Safe Storage 密钥（也可用环境变量 ANT_KEYCHAIN_PASSWORD）
 `, toolVersion)
 }
 
+// handleExportCLI 解析 export 子命令参数并执行离线导出。
 func handleExportCLI(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	var opts ExportOptions
@@ -127,10 +139,15 @@ func handleExportCLI(args []string) error {
 	fs.BoolVar(&opts.IncludeProxy, "include-proxy", false, "附带导出实例绑定的最小代理 IP 节点")
 	fs.BoolVar(&opts.IncludeDeleted, "include-deleted", false, "包含回收站实例")
 	fs.BoolVar(&opts.SkipLocked, "skip-locked", false, "跳过运行中的实例")
-	fs.BoolVar(&opts.SkipUnreadable, "skip-unreadable", false, "跳过本机 DPAPI 无法解密的实例")
+	fs.BoolVar(&opts.SkipUnreadable, "skip-unreadable", false, "跳过本机密钥无法解密的实例")
+	fs.StringVar(&opts.KeychainService, "keychain-service", "", "[仅 macOS] Safe Storage 钥匙串服务名")
+	fs.StringVar(&opts.KeychainPassword, "keychain-password", "", "[仅 macOS] Safe Storage 密钥明文")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if opts.KeychainPassword == "" {
+		opts.KeychainPassword = os.Getenv("ANT_KEYCHAIN_PASSWORD")
 	}
 
 	opts.ProfileFilters = profiles
@@ -168,6 +185,7 @@ func handleExportCLI(args []string) error {
 	return nil
 }
 
+// handleImportCLI 解析 import 子命令参数并执行离线导入或 Dry-Run 预览。
 func handleImportCLI(args []string) error {
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	var opts ImportOptions
@@ -187,9 +205,14 @@ func handleImportCLI(args []string) error {
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "仅预览匹配计划不修改磁盘")
 	fs.BoolVar(&opts.NoBackup, "no-backup", false, "跳过自动备份")
 	fs.BoolVar(&opts.Force, "force", false, "跳过主程序运行检查")
+	fs.StringVar(&opts.KeychainService, "keychain-service", "", "[仅 macOS] Safe Storage 钥匙串服务名")
+	fs.StringVar(&opts.KeychainPassword, "keychain-password", "", "[仅 macOS] Safe Storage 密钥明文")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if opts.KeychainPassword == "" {
+		opts.KeychainPassword = os.Getenv("ANT_KEYCHAIN_PASSWORD")
 	}
 	opts.ProfileFilters = profiles
 
@@ -232,6 +255,7 @@ func handleImportCLI(args []string) error {
 	return nil
 }
 
+// handleInspectCLI 读取并打印迁移包公开摘要 manifest.json（无需解密密码）。
 func handleInspectCLI(args []string) error {
 	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	var inputPath string
@@ -253,11 +277,12 @@ func handleInspectCLI(args []string) error {
 	return nil
 }
 
+// runInteractive 启动面向非命令行用户的中文交互式向导菜单。
 func runInteractive() {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("============================================================")
 	fmt.Printf("  Ant Browser 账号登录态离线迁移工具 v%s\n", toolVersion)
-	fmt.Println("  全程离线 DPAPI 重加密 | 零启动浏览器 | 可选代理 IP 与指纹")
+	fmt.Printf("  当前加密后端: %s | 零启动浏览器 | 可选代理 IP 与指纹\n", platformCryptoLabel())
 	fmt.Println("============================================================")
 	fmt.Println()
 
@@ -293,6 +318,7 @@ func runInteractive() {
 	}
 }
 
+// interactiveExport 交互式引导用户选择源目录、存储范围、可选指纹/代理与输出密码并执行导出。
 func interactiveExport(reader *bufio.Reader) error {
 	appRoot, err := promptSelectAppRoot(reader, "选择要导出登录态的源 Ant Browser 目录")
 	if err != nil {
@@ -351,6 +377,7 @@ func interactiveExport(reader *bufio.Reader) error {
 	return nil
 }
 
+// interactiveImport 交互式引导用户预览迁移包、匹配目标实例、确认同步选项并执行导入。
 func interactiveImport(reader *bufio.Reader) error {
 	fmt.Print("请输入或拖入 .antsess 迁移包路径: ")
 	inPath := stripSurroundingQuotes(readLineTrim(reader))
@@ -461,6 +488,7 @@ func interactiveImport(reader *bufio.Reader) error {
 	return nil
 }
 
+// interactiveInspect 交互式读取并打印指定 .antsess 迁移包的公开摘要清单。
 func interactiveInspect(reader *bufio.Reader) error {
 	fmt.Print("请输入或拖入 .antsess 迁移包路径: ")
 	inPath := stripSurroundingQuotes(readLineTrim(reader))
@@ -475,6 +503,7 @@ func interactiveInspect(reader *bufio.Reader) error {
 	return nil
 }
 
+// promptSelectAppRoot 自动列出本机探测到的开发版与正式版目录供用户编号选择，也支持直接粘贴自定义路径。
 func promptSelectAppRoot(reader *bufio.Reader, title string) (string, error) {
 	detected := discoverAppInstallations()
 	fmt.Printf("%s：\n", title)
@@ -522,6 +551,7 @@ func promptSelectAppRoot(reader *bufio.Reader, title string) (string, error) {
 	return input, nil
 }
 
+// promptExportPassword 引导用户输入两次加密密码（关闭回显），直接回车时二次确认是否明文导出。
 func promptExportPassword(reader *bufio.Reader, includeProxy bool) (password string, noPassword bool, err error) {
 	hint := "\n设置迁移包密码（建议设置；直接回车可选择不加密）: "
 	if includeProxy {
@@ -551,6 +581,7 @@ func promptExportPassword(reader *bufio.Reader, includeProxy bool) (password str
 	return p1, false, nil
 }
 
+// promptPasswordOnce 临时关闭终端回显并读取单行密码输入。
 func promptPasswordOnce(reader *bufio.Reader, prompt string) (string, error) {
 	fmt.Print(prompt)
 	restore := setConsoleEcho(false)
@@ -563,16 +594,19 @@ func promptPasswordOnce(reader *bufio.Reader, prompt string) (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
+// readLineTrim 从缓冲流读取一行并去除首尾空白字符。
 func readLineTrim(reader *bufio.Reader) string {
 	line, _ := reader.ReadString('\n')
 	return strings.TrimSpace(line)
 }
 
+// isYes 判断用户输入是否为显式肯定（y/yes，默认为否）。
 func isYes(s string) bool {
 	low := strings.ToLower(strings.TrimSpace(s))
 	return low == "y" || low == "yes"
 }
 
+// isYesDefaultTrue 判断用户输入是否为肯定（空回车默认视为是）。
 func isYesDefaultTrue(s string) bool {
 	low := strings.ToLower(strings.TrimSpace(s))
 	if low == "" {
@@ -581,6 +615,7 @@ func isYesDefaultTrue(s string) bool {
 	return low == "y" || low == "yes"
 }
 
+// stripSurroundingQuotes 去除用户拖拽文件到终端窗口时系统自动包裹的首尾引号。
 func stripSurroundingQuotes(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
@@ -589,6 +624,7 @@ func stripSurroundingQuotes(s string) string {
 	return s
 }
 
+// printManifestSummary 格式化输出 .antsess 迁移包的清单摘要、实例统计与导出告警。
 func printManifestSummary(path string, m *ArchiveManifest) {
 	encStatus := "已加密（scrypt + AES-256-GCM）"
 	if !m.Encrypted {
@@ -660,6 +696,7 @@ func printManifestSummary(path string, m *ArchiveManifest) {
 	fmt.Println()
 }
 
+// printExportSummary 打印导出结果汇总、跳过统计与 Google 动态令牌防风控提醒。
 func printExportSummary(s *ExportSummary) {
 	fmt.Println("\n============================================================")
 	fmt.Println("  导出完成（全程离线，未启动浏览器，零网络发包）")
@@ -695,8 +732,9 @@ func printExportSummary(s *ExportSummary) {
 	fmt.Println()
 }
 
+// printImportSummary 打印导入执行结果（或 Dry-Run 预览）、逐实例写入明细与回滚备份路径。
 func printImportSummary(s *ImportSummary) {
-	title := "导入完成（已使用本机 Windows DPAPI 重新加密）"
+	title := fmt.Sprintf("导入完成（已通过 %s 重新加密）", platformCryptoLabel())
 	if s.DryRun {
 		title = "导入预览（Dry-Run，未写入任何文件）"
 	}
