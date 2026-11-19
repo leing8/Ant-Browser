@@ -311,7 +311,14 @@ function Build-WindowsBinary {
         finally {
             Pop-Location
         }
-        Invoke-NativeCommand -FilePath "wails" -Arguments @("build", "-tags", "native_webview2loader")
+        $frontendDist = Join-Path $repoRoot "frontend/dist"
+        if (-not (Test-Path -LiteralPath $frontendDist -PathType Container)) {
+            New-Item -ItemType Directory -Path $frontendDist -Force | Out-Null
+        }
+        if (@(Get-ChildItem -LiteralPath $frontendDist -Force).Count -eq 0) {
+            Set-Content -LiteralPath (Join-Path $frontendDist "__wails_placeholder__.txt") -Value "placeholder" -Encoding ascii
+        }
+        Invoke-NativeCommand -FilePath "wails" -Arguments @("build", "-skipembedcreate", "-tags", "native_webview2loader")
     }
     finally {
         $env:GOPROXY = $previousGoProxy

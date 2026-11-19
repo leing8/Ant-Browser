@@ -25,19 +25,19 @@ if "%SHOW_USAGE%"=="1" (
 
 if /I "%DEV_MODE%"=="stable" (
     call :run_stable
-    set "EXIT_CODE=%errorlevel%"
+    set "EXIT_CODE=!errorlevel!"
     goto :finish
 )
 
 if /I "%DEV_MODE%"=="live" (
     call :run_live 0
-    set "EXIT_CODE=%errorlevel%"
+    set "EXIT_CODE=!errorlevel!"
     goto :finish
 )
 
 if /I "%DEV_MODE%"=="limited" (
     call :run_live 1
-    set "EXIT_CODE=%errorlevel%"
+    set "EXIT_CODE=!errorlevel!"
     goto :finish
 )
 
@@ -140,7 +140,7 @@ echo Asset source: frontend\dist
 echo Auto reload: disabled
 echo.
 
-wails dev -m -nogorebuild -noreload -s -skipbindings -assetdir frontend/dist
+wails dev -m -nogorebuild -noreload -s -skipbindings -skipembedcreate -assetdir frontend/dist
 set "EXIT_CODE=%errorlevel%"
 
 if not "%EXIT_CODE%"=="0" (
@@ -235,7 +235,7 @@ echo Starting Wails dev...
 echo Frontend URL: http://127.0.0.1:%FRONTEND_PORT%
 echo.
 
-wails dev -m -s -skipbindings -frontenddevserverurl http://127.0.0.1:%FRONTEND_PORT% -viteservertimeout 60
+wails dev -m -s -skipbindings -skipembedcreate -frontenddevserverurl http://127.0.0.1:%FRONTEND_PORT% -viteservertimeout 60
 set "EXIT_CODE=%errorlevel%"
 
 if not "%EXIT_CODE%"=="0" (
@@ -419,12 +419,13 @@ if not exist "frontend\dist" (
 exit /b 0
 
 :wait_for_frontend_dev_server
-powershell -NoProfile -Command "$port=%FRONTEND_PORT%; $pid=%WATCHER_PID%; $deadline=(Get-Date).AddSeconds(20); while((Get-Date) -lt $deadline){ $listener = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -First 1; if($listener){ exit 0 }; if(-not (Get-Process -Id $pid -ErrorAction SilentlyContinue)){ exit 2 }; Start-Sleep -Milliseconds 500 }; exit 1"
-if "%errorlevel%"=="0" (
+powershell -NoProfile -Command "$port=%FRONTEND_PORT%; $watcherPid=%WATCHER_PID%; $deadline=(Get-Date).AddSeconds(20); while((Get-Date) -lt $deadline){ $listener = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -First 1; if($listener){ exit 0 }; if(-not (Get-Process -Id $watcherPid -ErrorAction SilentlyContinue)){ exit 2 }; Start-Sleep -Milliseconds 500 }; exit 1"
+set "WAIT_EXIT_CODE=%errorlevel%"
+if "%WAIT_EXIT_CODE%"=="0" (
     echo [OK] Frontend dev server is listening on %FRONTEND_PORT%.
     exit /b 0
 )
-if "%errorlevel%"=="2" (
+if "%WAIT_EXIT_CODE%"=="2" (
     echo [ERROR] Frontend watcher exited before the dev server became ready.
 ) else (
     echo [ERROR] Timed out waiting for the frontend dev server on port %FRONTEND_PORT%.
@@ -480,6 +481,6 @@ for %%f in (
     "wails-dev-stderr.log"
     "wails-dev-stdout.log"
 ) do (
-    if exist %%~f del /F /Q %%~f >nul 2>&1
+    if exist "%%~f" del /F /Q "%%~f" >nul 2>&1
 )
 exit /b 0

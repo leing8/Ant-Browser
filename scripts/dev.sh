@@ -89,6 +89,13 @@ build_frontend() {
   npm run build:clean
 }
 
+ensure_embed_dist() {
+  mkdir -p "$ROOT_DIR/frontend/dist"
+  if [[ -z "$(ls -A "$ROOT_DIR/frontend/dist" 2>/dev/null || true)" ]]; then
+    printf 'placeholder\n' > "$ROOT_DIR/frontend/dist/__wails_placeholder__.txt"
+  fi
+}
+
 run_stable() {
   echo "========================================"
   echo "  Ant Chrome - Dev Launcher"
@@ -109,7 +116,7 @@ run_stable() {
   cd "$ROOT_DIR"
   echo "Starting Wails dev..."
   echo "Wails dev server: http://$WAILS_DEVSERVER_ADDRESS"
-  exec wails dev ${WAILS_BUILD_TAGS[@]+"${WAILS_BUILD_TAGS[@]}"} -m -nogorebuild -noreload -s -skipbindings -assetdir frontend/dist -devserver "$WAILS_DEVSERVER_ADDRESS"
+  exec wails dev ${WAILS_BUILD_TAGS[@]+"${WAILS_BUILD_TAGS[@]}"} -m -nogorebuild -noreload -s -skipbindings -skipembedcreate -assetdir frontend/dist -devserver "$WAILS_DEVSERVER_ADDRESS"
 }
 
 run_live() {
@@ -129,6 +136,7 @@ run_live() {
 
   prepare_env
   resolve_wails_devserver
+  ensure_embed_dist
 
   cd "$ROOT_DIR/frontend"
   install_frontend_deps
@@ -138,7 +146,7 @@ run_live() {
   cd "$ROOT_DIR"
   echo "Starting Wails dev..."
   echo "Wails dev server: http://$WAILS_DEVSERVER_ADDRESS"
-  exec wails dev ${WAILS_BUILD_TAGS[@]+"${WAILS_BUILD_TAGS[@]}"} -m -s -skipbindings -frontenddevserverurl "http://127.0.0.1:$frontend_port" -viteservertimeout 60 -devserver "$WAILS_DEVSERVER_ADDRESS"
+  exec wails dev ${WAILS_BUILD_TAGS[@]+"${WAILS_BUILD_TAGS[@]}"} -m -s -skipbindings -skipembedcreate -frontenddevserverurl "http://127.0.0.1:$frontend_port" -viteservertimeout 60 -devserver "$WAILS_DEVSERVER_ADDRESS"
 }
 
 case "$MODE" in

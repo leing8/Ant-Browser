@@ -80,7 +80,7 @@ jobs:
           set -euo pipefail
           (cd frontend && npm ci --prefer-offline --no-audit --no-fund)
           (cd frontend && npm run build:clean)
-          wails build -s -platform windows/amd64 -o ant-chrome.exe
+          wails build -s -skipembedcreate -platform windows/amd64 -o ant-chrome.exe
           ls -l build/bin
 
       - name: Assemble staging

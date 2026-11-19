@@ -207,7 +207,7 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
   echo "[3/4] Building macOS app bundle with Wails..."
   (
     cd "$ROOT_DIR"
-    wails build -s -platform "darwin/$ARCH" -o ant-chrome
+    wails build -s -skipembedcreate -platform "darwin/$ARCH" -o ant-chrome
   )
 else
   echo "[WARN] skipping build step"

@@ -198,7 +198,7 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
   fi
   (
     cd "$ROOT_DIR"
-    wails build -s -platform "linux/$ARCH" "${WAILS_BUILD_TAGS[@]}" -o ant-chrome
+    wails build -s -skipembedcreate -platform "linux/$ARCH" "${WAILS_BUILD_TAGS[@]}" -o ant-chrome
   )
 else
   echo "[WARN] skipping build step"
