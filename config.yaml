@@ -57,6 +57,10 @@ browser:
           core_name: chromium-144.0.7559.132
           core_path: chrome\chromium-144.0.7559.132
           is_default: true
+        - core_id: core-ungoogled-chromium-148.0.7778.215
+          core_name: Chrome ungoogled-chromium-148.0.7778.215
+          core_path: chrome/ungoogled-chromium-148.0.7778.215
+          is_default: true
     proxies:
         - proxy_id: __direct__
           proxy_name: 直连（不走代理）

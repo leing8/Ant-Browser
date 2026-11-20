@@ -1,0 +1,4 @@
+# Local compiled binaries & temporary migration archives (do not commit)
+ant-session-migrator
+ant-session-migrator-*
+*.antsess

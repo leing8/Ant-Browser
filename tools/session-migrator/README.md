@@ -19,10 +19,11 @@
 
 ---
 
-## 快速编译
+## 快速编译与启动脚本
 
-- **Windows 单文件**：运行 `tools\session-migrator\build.bat` 生成 `ant-session-migrator.exe`
-- **一键交叉编译 macOS（arm64 Apple Silicon + amd64 Intel）与 Windows**：
+- **macOS 本地源码启动（自动编译）**：直接运行 `tools/session-migrator/run-migrator.sh`（首次缺失二进制时自动以纯 Go `CGO_ENABLED=0` 编译本机 `arm64`/`amd64` 单文件 `ant-session-migrator`，之后直接复用；源码改动后可执行 `MIGRATOR_REBUILD=1 ./tools/session-migrator/run-migrator.sh` 强制重编；无参数进入中文交互菜单，带参数原样透传给 CLI）
+- **Windows 本地编译与启动**：运行 `tools\session-migrator\build.bat` 生成 `ant-session-migrator.exe`，或直接运行 `tools\session-migrator\run-migrator.bat`（缺失时自动编译）
+- **Windows 一键交叉编译 macOS（arm64 Apple Silicon + amd64 Intel）与 Windows**：
   ```bat
   tools\session-migrator\build-mac.bat
   ```
@@ -32,7 +33,42 @@
 
 ---
 
-## macOS 正式版导入步骤（从 Windows 迁移到 macOS）
+## macOS 使用步骤（支持开发版 `./scripts/dev-mac.sh` 与正式版）
+
+### 方式 A：macOS 开发版（项目根目录数据，搭配 `./scripts/dev-mac.sh`）
+
+1. 先用 `./scripts/dev-mac.sh` 启动一次 Ant Browser，完成 `<项目根>/data/app.db` 初始化与 `<项目根>/chrome/` 内核配置，然后**彻底退出 Ant Browser**（`Cmd + Q` 或 `Ctrl + C`）。
+2. 在项目根目录直接通过 `run-migrator.sh` 执行（脚本会自动编译本机单文件并保留调用方当前目录，相对路径可直接使用）：
+   ```bash
+   # 进入中文交互菜单（无参数）
+   ./tools/session-migrator/run-migrator.sh
+
+   # 查看迁移包摘要（无需密码）
+   ./tools/session-migrator/run-migrator.sh inspect \
+     --in "/Users/<用户名>/Downloads/ant-sessions-full.antsess"
+
+   # 预览导入计划（Dry-Run，不写入任何文件）
+   ./tools/session-migrator/run-migrator.sh import \
+     --app-root . \
+     --in "/Users/<用户名>/Downloads/ant-sessions-full.antsess" \
+     --create-missing --sync-fingerprint --sync-proxy --dry-run
+
+   # 正式离线导入到当前项目根目录（写入 data/app.db 与 data/<profile_id>/Default/）
+   ./tools/session-migrator/run-migrator.sh import \
+     --app-root . \
+     --in "/Users/<用户名>/Downloads/ant-sessions-full.antsess" \
+     --create-missing --sync-fingerprint --sync-proxy
+
+   # 从 macOS 开发版离线导出（同样支持跨系统导回 Windows）
+   ./tools/session-migrator/run-migrator.sh export \
+     --app-root . \
+     --out "./mac-sessions-full.antsess" \
+     --include-fingerprint --include-proxy --skip-unreadable
+   ```
+3. 导入完成后重新执行 `./scripts/dev-mac.sh` 启动应用即可看到已迁移实例；原数据库会自动回滚备份到 `data/.session-migrator-backups/<时间戳>/`。
+4. 若此前从未在 Mac 上启动过 Chromium，工具会自动在登录钥匙串创建兼容的 `Chromium Safe Storage`；首次从 Ant Browser 打开导入后的实例时若 macOS 提示钥匙串授权，点击 **始终允许** 即可。
+
+### 方式 B：macOS 正式版（独立状态目录 `~/Library/Application Support/ant-browser`）
 
 1. **安装并初始化 macOS 正式版**：
    - 将 `AntBrowser-<版本>-macos-<arm64|amd64>.zip` 解压得到 `.app`，去掉隔离属性后首次打开：
@@ -41,7 +77,7 @@
      open "AntBrowser-1.9.3-macos-arm64.app"
      ```
    - 在 Ant Browser 中下载/配置好 macOS 版 Chromium 内核后，**建议新建并打开关闭一次空白测试实例**（让 Chromium 自己写入本机钥匙串 `Chromium Safe Storage`，后续不会反复弹钥匙串授权），然后**彻底退出 Ant Browser**（`Cmd + Q`）。
-2. **解压并运行 macOS 版迁移工具**：
+2. **解压并运行预编译版（或源码版 `run-migrator.sh`）**：
    - 解压 `ant-session-migrator-1.2.0-macos-arm64.zip`（Intel Mac 用 `amd64`），终端执行（或双击 `run-migrator.command` 进入交互菜单）：
      ```bash
      xattr -dr com.apple.quarantine ./ant-session-migrator
